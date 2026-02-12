@@ -1,7 +1,3 @@
-"""
-FootyOracle - A football prediction model using machine learning techniques.
-"""
-
 from datetime import datetime
 from typing import List, Optional, Dict
 import json
