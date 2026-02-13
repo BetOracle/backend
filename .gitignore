@@ -46,6 +46,8 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
+docs/DEPLOYMENT_HELP.md
+
 # Testing
 .pytest_cache/
 .coverage
