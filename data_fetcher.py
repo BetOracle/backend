@@ -3,10 +3,16 @@ import os
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import time
+import re
+import unicodedata
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from mock_data import MockDataProvider
 
 load_dotenv()
+
+_MISSING_FOOTBALL_API_KEY = "Missing FOOTBALL_API_KEY"
+_MISSING_RAPIDAPI_KEY = "Missing RAPIDAPI_KEY"
 
 
 class DataFetcher:
@@ -37,8 +43,20 @@ class DataFetcher:
             "RAPIDAPI_URL", "https://v3.football.api-sports.io"
         )
 
+        self.rapidapi_season = int(
+            os.getenv("RAPIDAPI_SEASON", str(datetime.now().year))
+        )
+        self.rapidapi_host = os.getenv("RAPIDAPI_HOST", "")
+        if not self.rapidapi_host:
+            parsed = urlparse(self.rapidapi_url)
+            self.rapidapi_host = parsed.netloc
+
         # Mock mode
         self.mock_mode = os.getenv("MOCK_MODE", "True").lower() == "true"
+
+        self.strict_real_data = os.getenv("STRICT_REAL_DATA", "False").lower() == "true"
+        if not self.mock_mode:
+            self.strict_real_data = True
 
         self.requests_per_minute = int(os.getenv("REQUESTS_PER_MINUTE", "10"))
         self.min_request_interval_seconds = (
@@ -79,6 +97,28 @@ class DataFetcher:
                 print("   ✅ football-data.org connected")
             if self.rapidapi_key:
                 print("   ✅ RapidAPI connected")
+            if self.strict_real_data:
+                print("   ✅ Strict real-data mode (no mock fallback)")
+
+    def _strict_fail(self, reason: str):
+        if self.strict_real_data and not self.mock_mode:
+            raise RuntimeError(reason)
+
+    def _normalize_team_name(self, name: str) -> str:
+        name = unicodedata.normalize("NFKD", name)
+        name = "".join(ch for ch in name if not unicodedata.combining(ch))
+        name = name.lower()
+        name = re.sub(r"\b(cf|fc|sc|ac|rcd|cd|ud|de|la|el|the)\b", " ", name)
+        name = re.sub(r"[^a-z0-9]+", " ", name)
+        name = re.sub(r"\s+", " ", name).strip()
+        return name
+
+    def _string_token_score(self, a: str, b: str) -> int:
+        a_tokens = set(a.split())
+        b_tokens = set(b.split())
+        if not a_tokens or not b_tokens:
+            return 0
+        return len(a_tokens & b_tokens)
 
     def _get_cached(self, cache_key: Optional[str]) -> Optional[Dict]:
         if not cache_key:
@@ -230,7 +270,10 @@ class DataFetcher:
         Returns:
             ['W', 'L', 'D', 'W', 'W']
         """
-        if self.mock_mode or not self.football_api_key:
+        if self.mock_mode:
+            return self.mock.get_team_form(team_name, last_n)
+        if not self.football_api_key:
+            self._strict_fail(_MISSING_FOOTBALL_API_KEY)
             return self.mock.get_team_form(team_name, last_n)
 
         try:
@@ -238,6 +281,7 @@ class DataFetcher:
             team_id = self._get_team_id_football_data(team_name, league_id)
 
             if not team_id:
+                self._strict_fail(f"Could not resolve team id for '{team_name}'")
                 return self.mock.get_team_form(team_name, last_n)
 
             url = f"{self.football_api_url}/teams/{team_id}/matches?status=FINISHED&limit={last_n}"
@@ -245,6 +289,7 @@ class DataFetcher:
             data = self._make_request(url, headers, f"form_{team_id}")
 
             if not data or "matches" not in data:
+                self._strict_fail("No matches returned for team form")
                 return self.mock.get_team_form(team_name, last_n)
 
             form = []
@@ -262,7 +307,9 @@ class DataFetcher:
             return form[:last_n]
 
         except Exception as e:
-            print(f"Error fetching form: {e}")
+            if not self.strict_real_data:
+                print(f"Error fetching form: {e}")
+            self._strict_fail(f"Error fetching form: {e}")
             return self.mock.get_team_form(team_name, last_n)
 
     def _get_team_id_football_data(
@@ -304,7 +351,10 @@ class DataFetcher:
                 ...
             ]
         """
-        if self.mock_mode or not self.rapidapi_key:
+        if self.mock_mode:
+            return self.mock.get_injuries(team_name)
+        if not self.rapidapi_key:
+            self._strict_fail(_MISSING_RAPIDAPI_KEY)
             return self.mock.get_injuries(team_name)
 
         try:
@@ -313,18 +363,20 @@ class DataFetcher:
             team_id = self._get_team_id_rapidapi(team_name, league_id)
 
             if not team_id:
+                self._strict_fail(f"Could not resolve RapidAPI team id for '{team_name}'")
                 return self.mock.get_injuries(team_name)
 
             # Fetch injuries from RapidAPI
-            url = f"{self.rapidapi_url}/injuries?team={team_id}"
+            url = f"{self.rapidapi_url}/injuries?season={self.rapidapi_season}&team={team_id}"
             headers = {
                 "X-RapidAPI-Key": self.rapidapi_key,
-                "X-RapidAPI-Host": "v3.football.api-sports.io",
+                "X-RapidAPI-Host": self.rapidapi_host,
             }
 
             data = self._make_request(url, headers, f"injuries_{team_id}")
 
             if not data or "response" not in data:
+                self._strict_fail("No injuries returned")
                 return self.mock.get_injuries(team_name)
 
             # Parse injuries
@@ -359,15 +411,17 @@ class DataFetcher:
             return injuries
 
         except Exception as e:
-            print(f"Error fetching injuries: {e}")
+            if not self.strict_real_data:
+                print(f"Error fetching injuries: {e}")
+            self._strict_fail(f"Error fetching injuries: {e}")
             return self.mock.get_injuries(team_name)
 
     def _get_team_id_rapidapi(self, team_name: str, league_id: int) -> Optional[int]:
         """Get team ID from RapidAPI"""
-        url = f"{self.rapidapi_url}/teams?league={league_id}&season=2024"
+        url = f"{self.rapidapi_url}/teams?league={league_id}&season={self.rapidapi_season}"
         headers = {
             "X-RapidAPI-Key": self.rapidapi_key,
-            "X-RapidAPI-Host": "v3.football.api-sports.io",
+            "X-RapidAPI-Host": self.rapidapi_host,
         }
 
         data = self._make_request(url, headers, f"teams_rapid_{league_id}")
@@ -375,12 +429,25 @@ class DataFetcher:
         if not data or "response" not in data:
             return None
 
+        target_norm = self._normalize_team_name(team_name)
+        best_id = None
+        best_score = -1
+        best_len = 10**9
+
         for team_data in data["response"]:
             team = team_data.get("team", {})
-            if team_name.lower() in team.get("name", "").lower():
-                return team.get("id")
+            candidate_name = team.get("name", "")
+            candidate_norm = self._normalize_team_name(candidate_name)
+            score = self._string_token_score(target_norm, candidate_norm)
+            if score > best_score or (score == best_score and len(candidate_norm) < best_len):
+                best_score = score
+                best_len = len(candidate_norm)
+                best_id = team.get("id")
 
-        return None
+        if best_score <= 0:
+            return None
+
+        return best_id
 
     # =========================================================================
     # HEAD-TO-HEAD
@@ -398,7 +465,10 @@ class DataFetcher:
         Returns:
             ['HOME', 'AWAY', 'DRAW', ...]
         """
-        if self.mock_mode or not self.football_api_key:
+        if self.mock_mode:
+            return self.mock.get_h2h(home_team, away_team, last_n)
+        if not self.football_api_key:
+            self._strict_fail(_MISSING_FOOTBALL_API_KEY)
             return self.mock.get_h2h(home_team, away_team, last_n)
 
         try:
@@ -407,11 +477,13 @@ class DataFetcher:
             away_id = self._get_team_id_football_data(away_team, league_id)
 
             if not home_id or not away_id:
+                self._strict_fail("Could not resolve team ids for H2H")
                 return self.mock.get_h2h(home_team, away_team, last_n)
 
             data = self._fetch_team_matches_football_data(home_id)
 
             if not data or "matches" not in data:
+                self._strict_fail("No matches returned for H2H")
                 return self.mock.get_h2h(home_team, away_team, last_n)
 
             h2h_results = self._parse_h2h_results(data["matches"], home_id, away_id, last_n)
@@ -423,7 +495,9 @@ class DataFetcher:
             )
 
         except Exception as e:
-            print(f"Error fetching H2H: {e}")
+            if not self.strict_real_data:
+                print(f"Error fetching H2H: {e}")
+            self._strict_fail(f"Error fetching H2H: {e}")
             return self.mock.get_h2h(home_team, away_team, last_n)
 
     # =========================================================================
@@ -440,7 +514,10 @@ class DataFetcher:
         Returns:
             Position (1-20)
         """
-        if self.mock_mode or not self.football_api_key:
+        if self.mock_mode:
+            return self.mock.get_table_position(team_name, league)
+        if not self.football_api_key:
+            self._strict_fail(_MISSING_FOOTBALL_API_KEY)
             return self.mock.get_table_position(team_name, league)
 
         try:
@@ -450,6 +527,7 @@ class DataFetcher:
             data = self._make_request(url, headers, f"standings_{league_id}")
 
             if not data or "standings" not in data:
+                self._strict_fail("No standings returned")
                 return self.mock.get_table_position(team_name, league)
 
             standings = data["standings"][0]["table"]
@@ -458,10 +536,13 @@ class DataFetcher:
                 if team_name.lower() in entry["team"]["name"].lower():
                     return entry["position"]
 
+            self._strict_fail(f"Team '{team_name}' not found in standings")
             return self.mock.get_table_position(team_name, league)
 
         except Exception as e:
-            print(f"Error fetching standings: {e}")
+            if not self.strict_real_data:
+                print(f"Error fetching standings: {e}")
+            self._strict_fail(f"Error fetching standings: {e}")
             return self.mock.get_table_position(team_name, league)
 
     # =========================================================================
@@ -478,7 +559,10 @@ class DataFetcher:
         Returns:
             "HOME_WIN", "DRAW", "AWAY_WIN" or None
         """
-        if self.mock_mode or not self.football_api_key:
+        if self.mock_mode:
+            return self.mock.get_match_result(match_id)
+        if not self.football_api_key:
+            self._strict_fail(_MISSING_FOOTBALL_API_KEY)
             return self.mock.get_match_result(match_id)
 
         try:
@@ -493,6 +577,7 @@ class DataFetcher:
             data = self._make_request(url, headers, f"result_{match_id}")
 
             if not data or "matches" not in data:
+                self._strict_fail("No matches returned for result lookup")
                 return self.mock.get_match_result(match_id)
 
             for match in data["matches"]:
@@ -510,7 +595,9 @@ class DataFetcher:
             return None
 
         except Exception as e:
-            print(f"Error fetching result: {e}")
+            if not self.strict_real_data:
+                print(f"Error fetching result: {e}")
+            self._strict_fail(f"Error fetching result: {e}")
             return self.mock.get_match_result(match_id)
 
     # =========================================================================
@@ -535,7 +622,10 @@ class DataFetcher:
                 ...
             ]
         """
-        if self.mock_mode or not self.football_api_key:
+        if self.mock_mode:
+            return self.mock.get_league_matches(league, days_ahead)
+        if not self.football_api_key:
+            self._strict_fail(_MISSING_FOOTBALL_API_KEY)
             return self.mock.get_league_matches(league, days_ahead)
 
         try:
@@ -549,6 +639,7 @@ class DataFetcher:
             data = self._make_request(url, headers, f"matches_{league_id}")
 
             if not data or "matches" not in data:
+                self._strict_fail("No matches returned for league matches")
                 return self.mock.get_league_matches(league, days_ahead)
 
             matches = []
@@ -571,5 +662,7 @@ class DataFetcher:
             return matches
 
         except Exception as e:
-            print(f"Error fetching matches: {e}")
+            if not self.strict_real_data:
+                print(f"Error fetching matches: {e}")
+            self._strict_fail(f"Error fetching matches: {e}")
             return self.mock.get_league_matches(league, days_ahead)

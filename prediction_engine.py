@@ -1,6 +1,7 @@
 import random
 from datetime import datetime
 from data_fetcher import DataFetcher
+import os
 
 
 class PredictionEngine:
@@ -16,6 +17,9 @@ class PredictionEngine:
 
     def __init__(self):
         self.data_fetcher = DataFetcher()
+
+        self.prediction_debug = os.getenv("PREDICTION_DEBUG", "False").lower() == "true"
+        self.injuries_enabled = os.getenv("INJURIES_ENABLED", "True").lower() == "true"
 
         # Weight configuration (tune these for better accuracy)
         self.weights = {
@@ -49,7 +53,11 @@ class PredictionEngine:
 
         # Calculate individual factors
         form_score = self._calculate_form_score(home_team, away_team, league)
-        injury_impact = self._calculate_injury_impact(home_team, away_team, league)
+        injury_impact = (
+            self._calculate_injury_impact(home_team, away_team, league)
+            if self.injuries_enabled
+            else 0.0
+        )
         h2h_score = self._calculate_h2h_score(home_team, away_team, league)
         position_score = self._calculate_position_score(home_team, away_team, league)
 
@@ -61,16 +69,30 @@ class PredictionEngine:
             "tablePositionScore": round(position_score, 2),
         }
 
+        form_w = self.weights["form"]
+        injury_w = self.weights["injury"] if self.injuries_enabled else 0.0
+        h2h_w = self.weights["h2h"]
+        pos_w = self.weights["position"]
+
+        weight_sum = form_w + injury_w + h2h_w + pos_w
+        if weight_sum <= 0:
+            weight_sum = 1.0
+
         # Calculate weighted total
         total_score = (
-            form_score * self.weights["form"]
-            + injury_impact * self.weights["injury"]
-            + h2h_score * self.weights["h2h"]
-            + position_score * self.weights["position"]
+            form_score * (form_w / weight_sum)
+            + injury_impact * (injury_w / weight_sum)
+            + h2h_score * (h2h_w / weight_sum)
+            + position_score * (pos_w / weight_sum)
         )
 
         # Determine prediction
         prediction, confidence = self._determine_outcome(total_score, factors)
+
+        if self.prediction_debug:
+            print(
+                f"      🔎 Factors: form={factors['formScore']}, injuries={factors['injuryImpact']}, h2h={factors['h2hScore']}, position={factors['tablePositionScore']}, total={round(total_score, 3)}"
+            )
 
         return {
             "matchId": match_id,
