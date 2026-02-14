@@ -24,7 +24,11 @@ class FootyOracleAgent:
     def __init__(self, backend_url=None):
         self.data_fetcher = DataFetcher()
         self.prediction_engine = PredictionEngine()
-        self.db = PredictionDatabase()
+        self.db = None
+        try:
+            self.db = PredictionDatabase()
+        except RuntimeError:
+            self.db = None
 
         self.mock_mode = os.getenv("MOCK_MODE", "True").lower() == "true"
 
@@ -159,7 +163,7 @@ class FootyOracleAgent:
         """Check if we already have a prediction for this match"""
 
         # Check local database
-        if self.db.get_prediction_by_match_id(match_id):
+        if self.db and self.db.get_prediction_by_match_id(match_id):
             return True
 
         # Check backend (optional)
@@ -196,16 +200,17 @@ class FootyOracleAgent:
         Record prediction in local DB and send to backend
         """
 
-        # Save locally
-        prediction = Prediction(
-            match_id=prediction_data["matchId"],
-            predicted_outcome=prediction_data["prediction"],
-            confidence=prediction_data["confidence"],
-            factors=prediction_data["factors"],
-            timestamp=prediction_data["timestamp"],
-        )
+        # Save locally (optional)
+        if self.db:
+            prediction = Prediction(
+                match_id=prediction_data["matchId"],
+                predicted_outcome=prediction_data["prediction"],
+                confidence=prediction_data["confidence"],
+                factors=prediction_data["factors"],
+                timestamp=prediction_data["timestamp"],
+            )
 
-        self.db.add_prediction(prediction)
+            self.db.add_prediction(prediction)
 
         # Send to backend API (which will record on-chain)
         try:
@@ -243,6 +248,13 @@ class FootyOracleAgent:
         print("=" * 60)
 
         try:
+            if not self.db:
+                try:
+                    requests.post(f"{self.backend_url}/api/resolve/auto")
+                except Exception as e:
+                    print(f"❌ Error in resolution cycle: {e}")
+                return
+
             unresolved = self.db.get_unresolved_predictions()
 
             if not unresolved:
