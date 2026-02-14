@@ -38,6 +38,7 @@ MOCK_MODE=True
 PORT=5000
 DEBUG=True
 BACKEND_URL=http://localhost:5000
+DATABASE_URL=postgresql://user:pass@host:5432/db
 ```
 
 ---
@@ -120,14 +121,12 @@ curl http://localhost:5000/api/predictions
 
 #### Check Predictions Database
 
-The agent saves predictions locally even if the API isn't running. After running the agent, you can check:
+Predictions are persisted in PostgreSQL (see `DATABASE_URL` in `.env`).
 
 ```python
 from models import PredictionDatabase
 
 db = PredictionDatabase()
-db.load_from_file('predictions.json')  # If saved
-
 stats = db.get_statistics()
 print(stats)
 # Output: {'totalPredictions': 6, 'resolved': 0, 'accuracy': 0.0, ...}
@@ -194,8 +193,7 @@ BACKEND_URL=http://localhost:8000
 ### What Gets Saved
 
 **Locally (always):**
-- In-memory database during runtime
-- Can save to `predictions.json` file
+- The agent posts predictions to the backend API (so persistence depends on the backend database)
 
 **Backend API (if running):**
 - Persistent database

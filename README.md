@@ -38,7 +38,7 @@ FootyOracle Backend
 │   ├── POST /api/resolve
 │   └── GET /api/stats
 │
-└── 🗄️ Database (SQLite/PostgreSQL)
+└── 🗄️ Database (PostgreSQL)
     └── Persistent prediction storage
 ```
 
@@ -99,14 +99,12 @@ python agent.py schedule
 
 **Typical Accuracy: 60-70%**
 
-### 🗄️ Database Options
-- **SQLite**: Simple file-based (perfect for hackathons)
-- **PostgreSQL**: Full database server (production-ready)
-- **In-Memory**: Fast development (data lost on restart)
+### 🗄️ Database
+- **PostgreSQL**: Persistent database (recommended)
 
 ### 📡 Mock vs Real Data
 - **Mock Mode**: 96 teams, realistic simulated data
-- **Real Mode**: Live data from football-data.org + RapidAPI
+- **Real Mode**: Live data from football-data.org
 
 ---
 
@@ -204,7 +202,6 @@ backend/
 ├── data_fetcher.py       # 📡 Data integration (real + mock)
 ├── mock_data.py          # 🎭 Comprehensive mock data (96 teams)
 ├── models.py             # 🗄️ Database (in-memory/SQLite)
-├── models_sqlite.py      # 🗄️ SQLite implementation
 ├── resolver.py           # ✅ Match result checker
 │
 ├── test_backend.py       # 🧪 Unit tests
@@ -235,42 +232,23 @@ BACKEND_URL=http://localhost:8000
 
 # Real Data APIs (optional)
 FOOTBALL_API_KEY=                 # football-data.org
-RAPIDAPI_KEY=                     # API-Football for injuries
 
-# Database (optional)
-DATABASE_URL=                     # PostgreSQL URL (for production)
+# Injuries (optional)
+INJURIES_ENABLED=False
+
+# Database
+DATABASE_URL=
 ```
 
 ---
 
 ## 🗄️ Database Setup
 
-### Option 1: SQLite (Recommended for Hackathon)
+### PostgreSQL (Recommended)
 
 ```bash
-# Use SQLite version
-cp models_sqlite.py models.py
-
-# Data persists in predictions.db file
-python app.py
-```
-
-**Pros:**
-- ✅ Zero configuration
-- ✅ Data survives restarts
-- ✅ Easy backups (copy file)
-- ✅ Perfect for demos
-
-### Option 2: PostgreSQL (Production)
-
-```bash
-# Install dependency
-pip install psycopg2-binary
-
 # Set database URL
 export DATABASE_URL=postgresql://user:pass@host/db
-
-# Use PostgreSQL-enabled models.py
 ```
 
 **Pros:**
@@ -278,9 +256,7 @@ export DATABASE_URL=postgresql://user:pass@host/db
 - ✅ Better concurrency
 - ✅ Auto-backups on Render/Railway
 
-### Option 3: In-Memory (Development)
-
-Current `models.py` works but **data lost on restart**.
+The backend requires `DATABASE_URL`.
 
 ---
 
@@ -316,21 +292,6 @@ railway up
 ```
 
 **PostgreSQL auto-configured!**
-
----
-
-## 📊 Performance
-
-### Benchmarks (SQLite)
-
-| Metric | Performance |
-|--------|-------------|
-| Predictions/second | ~150 |
-| Concurrent users | ~100 |
-| Response time | <50ms |
-| Database size | 1GB+ supported |
-
-**More than enough for hackathons!**
 
 ---
 
@@ -375,6 +336,35 @@ API provides predictions in this format:
 - JSON responses
 - WebSocket not needed (polling works)
 
+Example requests:
+
+```bash
+curl http://localhost:8000/api/predictions
+curl http://localhost:8000/api/predictions?league=EPL
+curl http://localhost:8000/api/stats
+```
+
+Example fetch (browser):
+
+```js
+const baseUrl = "http://localhost:8000";
+
+export async function getPredictions() {
+  const res = await fetch(`${baseUrl}/api/predictions`);
+  const data = await res.json();
+  return data.predictions;
+}
+
+export async function createPrediction(homeTeam, awayTeam, league) {
+  const res = await fetch(`${baseUrl}/api/predict`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ homeTeam, awayTeam, league }),
+  });
+  return res.json();
+}
+```
+
 ---
 
 ## 🐛 Troubleshooting
@@ -396,9 +386,6 @@ python agent.py
 
 ### Database Connection Issues
 ```bash
-# For SQLite
-ls predictions.db  # Should exist
-
 # For PostgreSQL
 echo $DATABASE_URL  # Should be set
 ```
@@ -410,7 +397,7 @@ echo $DATABASE_URL  # Should be set
 - [x] Autonomous agent
 - [x] Multi-factor prediction engine
 - [x] REST API
-- [x] SQLite persistence
+- [x] PostgreSQL persistence
 - [x] Mock data (96 teams)
 - [x] Real API integration
 - [x] Comprehensive tests
