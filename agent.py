@@ -58,11 +58,7 @@ class FootyOracleAgent:
 
         try:
             # Get upcoming matches for all leagues
-            leagues = (
-                ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1"]
-                if self.mock_mode
-                else ["EPL", "LaLiga"]
-            )
+            leagues = ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1"]
             total_predictions = 0
 
             for league in leagues:
@@ -115,6 +111,11 @@ class FootyOracleAgent:
                 print(f"   ✅ {match['homeTeam']} vs {match['awayTeam']}")
                 print(
                     f"      Prediction: {prediction['prediction']} ({prediction['confidence']:.1%})"
+                )
+
+            except RuntimeError as e:
+                print(
+                    f"   ⏭️  Skipped {match['homeTeam']} vs {match['awayTeam']}: {e}"
                 )
 
             except Exception as e:
