@@ -51,6 +51,36 @@ def create_prediction():
     try:
         data = request.get_json()
 
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "error": "Invalid JSON payload"}), 400
+
+        # Accept precomputed predictions (agent payload)
+        if all(k in data for k in ["matchId", "prediction", "confidence", "factors", "timestamp"]):
+            prediction = Prediction(
+                match_id=data["matchId"],
+                predicted_outcome=data["prediction"],
+                confidence=data["confidence"],
+                factors=data["factors"],
+                timestamp=data["timestamp"],
+            )
+
+            prediction_id = db.add_prediction(prediction)
+
+            return (
+                jsonify(
+                    {
+                        "success": True,
+                        "predictionId": prediction_id,
+                        "matchId": prediction.match_id,
+                        "prediction": prediction.predicted_outcome,
+                        "confidence": prediction.confidence,
+                        "factors": prediction.factors,
+                        "timestamp": prediction.timestamp,
+                    }
+                ),
+                201,
+            )
+
         # Validate input
         required_fields = ["homeTeam", "awayTeam", "league"]
         for field in required_fields:

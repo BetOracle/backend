@@ -2,6 +2,7 @@ import requests
 import os
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
+import time
 from dotenv import load_dotenv
 from mock_data import MockDataProvider
 
@@ -39,6 +40,12 @@ class DataFetcher:
         # Mock mode
         self.mock_mode = os.getenv("MOCK_MODE", "True").lower() == "true"
 
+        self.requests_per_minute = int(os.getenv("REQUESTS_PER_MINUTE", "10"))
+        self.min_request_interval_seconds = (
+            60.0 / self.requests_per_minute if self.requests_per_minute > 0 else 0.0
+        )
+        self._last_request_time = 0.0
+
         # Mock data provider
         self.mock = MockDataProvider()
 
@@ -73,6 +80,43 @@ class DataFetcher:
             if self.rapidapi_key:
                 print("   ✅ RapidAPI connected")
 
+    def _get_cached(self, cache_key: Optional[str]) -> Optional[Dict]:
+        if not cache_key:
+            return None
+        if cache_key not in self.cache:
+            return None
+        cached_time, cached_data = self.cache[cache_key]
+        if (datetime.now() - cached_time).seconds < self.cache_duration:
+            return cached_data
+        return None
+
+    def _set_cache(self, cache_key: Optional[str], data: Dict) -> None:
+        if cache_key:
+            self.cache[cache_key] = (datetime.now(), data)
+
+    def _throttle_if_needed(self) -> None:
+        if self.mock_mode or self.min_request_interval_seconds <= 0:
+            return
+
+        now = time.monotonic()
+        sleep_for = self._last_request_time + self.min_request_interval_seconds - now
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+    def _request_once(self, url: str, headers: Dict) -> requests.Response:
+        self._throttle_if_needed()
+        self._last_request_time = time.monotonic()
+        return requests.get(url, headers=headers, timeout=10)
+
+    def _backoff_seconds_from_response(self, response: requests.Response) -> float:
+        retry_after = response.headers.get("Retry-After")
+        if not retry_after:
+            return 6.0
+        try:
+            return float(retry_after)
+        except ValueError:
+            return 6.0
+
     def _make_request(
         self, url: str, headers: Dict, cache_key: str = None
     ) -> Optional[Dict]:
@@ -87,32 +131,86 @@ class DataFetcher:
         Returns:
             JSON response or None
         """
-        # Check cache
-        if cache_key and cache_key in self.cache:
-            cached_time, cached_data = self.cache[cache_key]
-            if (datetime.now() - cached_time).seconds < self.cache_duration:
-                return cached_data
+        cached_data = self._get_cached(cache_key)
+        if cached_data is not None:
+            return cached_data
 
         try:
-            response = requests.get(url, headers=headers, timeout=10)
-
+            response = self._request_once(url, headers)
             if response.status_code == 200:
                 data = response.json()
-                if cache_key:
-                    self.cache[cache_key] = (datetime.now(), data)
+                self._set_cache(cache_key, data)
                 return data
 
-            elif response.status_code == 429:
-                print(f"⚠️  Rate limit exceeded")
+            if response.status_code == 429:
+                print("⚠️  Rate limit exceeded")
+                time.sleep(max(0.0, self._backoff_seconds_from_response(response)))
+
+                retry_response = self._request_once(url, headers)
+                if retry_response.status_code == 200:
+                    data = retry_response.json()
+                    self._set_cache(cache_key, data)
+                    return data
+
                 return None
 
-            else:
-                print(f"⚠️  API error {response.status_code}")
-                return None
+            print(f"⚠️  API error {response.status_code}")
+            return None
 
         except Exception as e:
             print(f"❌ Request failed: {e}")
             return None
+
+    def _outcome_from_match_score(
+        self, team_name: str, home_team: str, home_score: int, away_score: int
+    ) -> str:
+        if home_team == team_name:
+            if home_score > away_score:
+                return "W"
+            if home_score < away_score:
+                return "L"
+            return "D"
+
+        if away_score > home_score:
+            return "W"
+        if away_score < home_score:
+            return "L"
+        return "D"
+
+    def _fetch_team_matches_football_data(self, team_id: int) -> Optional[Dict]:
+        url = f"{self.football_api_url}/teams/{team_id}/matches?status=FINISHED&limit=50"
+        headers = {"X-Auth-Token": self.football_api_key}
+        return self._make_request(url, headers, f"team_matches_{team_id}")
+
+    def _parse_h2h_results(
+        self, matches: List[Dict], home_id: int, away_id: int, last_n: int
+    ) -> List[str]:
+        def is_between_teams(match_home_id: int, match_away_id: int) -> bool:
+            return (match_home_id == home_id and match_away_id == away_id) or (
+                match_home_id == away_id and match_away_id == home_id
+            )
+
+        results: List[str] = []
+        for match in matches:
+            match_home_id = match["homeTeam"]["id"]
+            match_away_id = match["awayTeam"]["id"]
+            if not is_between_teams(match_home_id, match_away_id):
+                continue
+
+            home_score = match["score"]["fullTime"]["home"]
+            away_score = match["score"]["fullTime"]["away"]
+
+            if home_score > away_score:
+                results.append("HOME")
+            elif away_score > home_score:
+                results.append("AWAY")
+            else:
+                results.append("DRAW")
+
+            if len(results) >= last_n:
+                break
+
+        return results
 
     def _get_league_id(self, league: str, api_type: str = "football_data") -> str:
         """Get league ID for specific API"""
@@ -155,20 +253,11 @@ class DataFetcher:
                 home_score = match["score"]["fullTime"]["home"]
                 away_score = match["score"]["fullTime"]["away"]
 
-                if home_team == team_name:
-                    if home_score > away_score:
-                        form.append("W")
-                    elif home_score < away_score:
-                        form.append("L")
-                    else:
-                        form.append("D")
-                else:
-                    if away_score > home_score:
-                        form.append("W")
-                    elif away_score < home_score:
-                        form.append("L")
-                    else:
-                        form.append("D")
+                form.append(
+                    self._outcome_from_match_score(
+                        team_name, home_team, home_score, away_score
+                    )
+                )
 
             return form[:last_n]
 
@@ -320,34 +409,12 @@ class DataFetcher:
             if not home_id or not away_id:
                 return self.mock.get_h2h(home_team, away_team, last_n)
 
-            url = f"{self.football_api_url}/teams/{home_id}/matches?status=FINISHED&limit=50"
-            headers = {"X-Auth-Token": self.football_api_key}
-            data = self._make_request(url, headers, f"h2h_{home_id}_{away_id}")
+            data = self._fetch_team_matches_football_data(home_id)
 
             if not data or "matches" not in data:
                 return self.mock.get_h2h(home_team, away_team, last_n)
 
-            h2h_results = []
-            for match in data["matches"]:
-                home_match_id = match["homeTeam"]["id"]
-                away_match_id = match["awayTeam"]["id"]
-
-                if (home_match_id == home_id and away_match_id == away_id) or (
-                    home_match_id == away_id and away_match_id == home_id
-                ):
-
-                    home_score = match["score"]["fullTime"]["home"]
-                    away_score = match["score"]["fullTime"]["away"]
-
-                    if home_score > away_score:
-                        h2h_results.append("HOME")
-                    elif away_score > home_score:
-                        h2h_results.append("AWAY")
-                    else:
-                        h2h_results.append("DRAW")
-
-                    if len(h2h_results) >= last_n:
-                        break
+            h2h_results = self._parse_h2h_results(data["matches"], home_id, away_id, last_n)
 
             return (
                 h2h_results[:last_n]
