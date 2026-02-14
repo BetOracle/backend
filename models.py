@@ -67,11 +67,10 @@ class PredictionDatabase:
                 "DATABASE_URL is required (PostgreSQL). Set DATABASE_URL in your environment."
             )
 
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
+        import psycopg
+        from psycopg.rows import dict_row
 
-        self._real_dict_cursor = RealDictCursor
-        self._conn = psycopg2.connect(self.database_url)
+        self._conn = psycopg.connect(self.database_url, row_factory=dict_row)
 
         self._lock = threading.Lock()
         self._init_schema()
@@ -134,7 +133,7 @@ class PredictionDatabase:
             prediction.prediction_id = prediction.generate_prediction_id()
 
         with self._lock:
-            cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+            cur = self._conn.cursor()
             if prediction.correct is None:
                 correct_value = None
             else:
@@ -189,7 +188,7 @@ class PredictionDatabase:
 
     def get_prediction(self, prediction_id: str) -> Optional[Prediction]:
         """Get prediction by its ID."""
-        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur = self._conn.cursor()
         cur.execute(
             "SELECT * FROM predictions WHERE prediction_id = %s", (prediction_id,)
         )
@@ -198,21 +197,21 @@ class PredictionDatabase:
 
     def get_prediction_by_match_id(self, match_id: str) -> Optional[Prediction]:
         """Get prediction by match ID."""
-        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur = self._conn.cursor()
         cur.execute("SELECT * FROM predictions WHERE match_id = %s", (match_id,))
         row = cur.fetchone()
         return self._row_to_prediction(row) if row else None
 
     def get_all_predictions(self) -> List[Prediction]:
         """Get all predictions in the database."""
-        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur = self._conn.cursor()
         cur.execute("SELECT * FROM predictions ORDER BY timestamp DESC")
         rows = cur.fetchall()
         return [self._row_to_prediction(r) for r in rows]
 
     def get_unresolved_predictions(self) -> List[Prediction]:
         """Get all unresolved predictions."""
-        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur = self._conn.cursor()
         cur.execute(
             "SELECT * FROM predictions WHERE resolved = FALSE ORDER BY timestamp DESC"
         )
@@ -221,7 +220,7 @@ class PredictionDatabase:
 
     def get_predictions_by_league(self, league: str) -> List[Prediction]:
         """Get predictions for a specific league."""
-        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur = self._conn.cursor()
         cur.execute(
             "SELECT * FROM predictions WHERE match_id LIKE %s ORDER BY timestamp DESC",
             (f"{league}%",),
@@ -251,7 +250,7 @@ class PredictionDatabase:
         resolution_timestamp = int(datetime.now().timestamp())
 
         with self._lock:
-            cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+            cur = self._conn.cursor()
             cur.execute(
                 """
                 UPDATE predictions
@@ -279,7 +278,7 @@ class PredictionDatabase:
     def delete_prediction(self, prediction_id: str) -> bool:
         """Delete a prediction by its ID."""
         with self._lock:
-            cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+            cur = self._conn.cursor()
             cur.execute(
                 "DELETE FROM predictions WHERE prediction_id = %s",
                 (prediction_id,),
@@ -292,7 +291,7 @@ class PredictionDatabase:
         Clear all predictions (use with caution!)
         """
         with self._lock:
-            cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+            cur = self._conn.cursor()
             cur.execute("DELETE FROM predictions")
             self._conn.commit()
 
@@ -315,7 +314,7 @@ class PredictionDatabase:
             }
         """
 
-        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur = self._conn.cursor()
         cur.execute("SELECT COUNT(*) AS c FROM predictions")
         total = int(cur.fetchone()["c"])
 
@@ -342,7 +341,7 @@ class PredictionDatabase:
 
     def get_league_statistics(self, league: str) -> dict:
         """Get statistics for specific league"""
-        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur = self._conn.cursor()
         cur.execute(
             "SELECT COUNT(*) AS c FROM predictions WHERE match_id LIKE %s",
             (f"{league}%",),
