@@ -32,27 +32,17 @@ cp .env.example .env
 # For now, just use mock mode
 ```
 
-**Your .env should contain:**
-```bash
-MOCK_MODE=True
-PORT=5000
-DEBUG=True
-BACKEND_URL=http://localhost:5000
-DATABASE_URL=postgresql://user:pass@host:5432/db
-```
+For data source configuration (mock vs real APIs), see `DATA_SOURCES.md`.
 
 ---
 
 ### Step 3: Test the System
 
-#### Option A: Run Agent Only (Standalone)
+#### Option A: Run Agent (one-time)
 
 ```bash
 # One-time prediction cycle
 python agent.py
-
-# Continuous mode (checks every hour)
-python agent.py schedule
 ```
 
 **What you should see:**
@@ -68,11 +58,11 @@ python agent.py schedule
       ⚠️  Backend not running (predictions saved locally)
 ```
 
-The warning is **normal** - predictions are saved locally even without the API running.
+If you want the agent to populate the deployed backend API hourly, see `DEPLOY_RENDER.md`.
 
 ---
 
-#### Option B: Run Backend API + Agent (Full System)
+#### Option B: Run Backend API (local)
 
 **Terminal 1: Start API Server**
 ```bash
@@ -90,17 +80,7 @@ Environment: Development
  * Running on http://127.0.0.1:5000
 ```
 
-**Terminal 2: Run Agent**
-```bash
-python agent.py
-```
-
-**Now you should see:**
-```
-   ✅ Newcastle vs Manchester City
-      Prediction: AWAY_WIN (71.0%)
-      📝 Recorded on-chain  ✅  # Success!
-```
+To learn the exact frontend request/response shapes, see `FRONTEND_API.md`.
 
 ---
 
@@ -119,18 +99,7 @@ curl http://localhost:5000/api/stats
 curl http://localhost:5000/api/predictions
 ```
 
-#### Check Predictions Database
-
-Predictions are persisted in PostgreSQL (see `DATABASE_URL` in `.env`).
-
-```python
-from models import PredictionDatabase
-
-db = PredictionDatabase()
-stats = db.get_statistics()
-print(stats)
-# Output: {'totalPredictions': 6, 'resolved': 0, 'accuracy': 0.0, ...}
-```
+For API response formats and examples, see `FRONTEND_API.md`.
 
 ---
 
@@ -178,27 +147,9 @@ BACKEND_URL=http://localhost:8000
 
 ---
 
-## 📊 Understanding the Output
+## 📊 Output Notes
 
-### Agent Output Explained
-
-```
-🔍 Checking EPL matches...              # Checking Premier League
-   ✅ Newcastle vs Manchester City       # Found a match to predict
-      Prediction: AWAY_WIN (71.0%)      # Man City to win, 71% confidence
-      📝 Recorded on-chain               # Saved to API ✅
-      ⚠️  Backend not running           # API not available, saved locally ⚠️
-```
-
-### What Gets Saved
-
-**Locally (always):**
-- The agent posts predictions to the backend API (so persistence depends on the backend database)
-
-**Backend API (if running):**
-- Persistent database
-- Available via REST endpoints
-- Can be queried by frontend
+The agent prints a summary per match. If the backend API is reachable, predictions are recorded via `POST /api/predict`.
 
 ---
 
@@ -207,7 +158,6 @@ BACKEND_URL=http://localhost:8000
 ### Mode 1: Agent Only (No API)
 ```bash
 python agent.py
-# Predictions saved in memory only
 # Good for: Testing prediction logic
 ```
 
