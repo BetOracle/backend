@@ -26,6 +26,8 @@ class FootyOracleAgent:
         self.prediction_engine = PredictionEngine()
         self.db = PredictionDatabase()
 
+        self.mock_mode = os.getenv("MOCK_MODE", "True").lower() == "true"
+
         # Backend API URL (for recording on-chain)
         self.backend_url = backend_url or os.getenv(
             "BACKEND_URL", "http://localhost:5000"
@@ -35,7 +37,7 @@ class FootyOracleAgent:
         self.prediction_window_hours = 24  # Predict matches within next 24 hours
         self.check_interval_minutes = 60  # Check for new matches every hour
 
-        print(f"🤖 FootyOracle Agent initialized")
+        print("🤖 FootyOracle Agent initialized")
         print(f"   Backend: {self.backend_url}")
         print(f"   Prediction window: {self.prediction_window_hours}h")
         print(f"   Check interval: {self.check_interval_minutes}m")
@@ -48,15 +50,19 @@ class FootyOracleAgent:
         3. Record predictions
         """
 
-        print(f"\n{'='*60}")
+        print("\n" + "=" * 60)
         print(
             f"🤖 Agent Cycle Started - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        print(f"{'='*60}")
+        print("=" * 60)
 
         try:
             # Get upcoming matches for all leagues
-            leagues = ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1"]
+            leagues = (
+                ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1"]
+                if self.mock_mode
+                else ["EPL", "LaLiga"]
+            )
             total_predictions = 0
 
             for league in leagues:
@@ -82,7 +88,7 @@ class FootyOracleAgent:
         matches = self.data_fetcher.get_league_matches(league)
 
         if not matches:
-            print(f"   No upcoming matches found")
+            print("   No upcoming matches found")
             return 0
 
         predictions_made = 0
@@ -137,7 +143,7 @@ class FootyOracleAgent:
             # Allow predictions up to 2 hours before match starts
             return -2 <= hours_until_match <= self.prediction_window_hours
 
-        except Exception as e:
+        except Exception:
             # Fallback to date-only comparison
             try:
                 match_date = datetime.strptime(match["date"], "%Y-%m-%d")
@@ -145,7 +151,7 @@ class FootyOracleAgent:
                 hours_until_match = (match_date - now).total_seconds() / 3600
 
                 return -24 <= hours_until_match <= self.prediction_window_hours
-            except:
+            except Exception:
                 return False
 
     def _already_predicted(self, match_id: str) -> bool:
@@ -161,7 +167,7 @@ class FootyOracleAgent:
             if response.status_code == 200:
                 predictions = response.json().get("predictions", [])
                 return any(p["matchId"] == match_id for p in predictions)
-        except:
+        except Exception:
             pass
 
         return False
@@ -214,7 +220,7 @@ class FootyOracleAgent:
             )
 
             if response.status_code == 201:
-                print(f"      📝 Recorded on-chain")
+                print("      📝 Recorded on-chain")
             else:
                 print(f"      ⚠️  Backend recording failed: {response.status_code}")
 
@@ -229,11 +235,11 @@ class FootyOracleAgent:
         3. Update records
         """
 
-        print(f"\n{'='*60}")
+        print("\n" + "=" * 60)
         print(
             f"🔍 Resolution Cycle Started - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        print(f"{'='*60}")
+        print("=" * 60)
 
         try:
             unresolved = self.db.get_unresolved_predictions()
@@ -266,7 +272,7 @@ class FootyOracleAgent:
                                 "actualOutcome": actual_outcome,
                             },
                         )
-                    except:
+                    except Exception:
                         pass
 
                     status = "✅ CORRECT" if is_correct else "❌ INCORRECT"

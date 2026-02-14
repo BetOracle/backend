@@ -22,16 +22,22 @@ class Prediction:
     def to_dict(self) -> dict:
         """Convert the prediction to a dictionary."""
         return {
-            "prediction_id": self.prediction_id,
-            "match_id": self.match_id,
-            "predicted_outcome": self.predicted_outcome,
+            "predictionId": self.prediction_id,
+            "matchId": self.match_id,
+            "prediction": self.predicted_outcome,
+            "predictedOutcome": self.predicted_outcome,
             "confidence": self.confidence,
             "factors": self.factors,
             "timestamp": self.timestamp,
             "resolved": self.resolved,
-            "actual_outcome": self.actual_outcome,
+            "actualOutcome": self.actual_outcome,
             "correct": self.correct,
-            "resolution_timestamp": self.resolution_timestamp
+            "resolutionTimestamp": self.resolution_timestamp,
+            "prediction_id": self.prediction_id,
+            "match_id": self.match_id,
+            "predicted_outcome": self.predicted_outcome,
+            "actual_outcome": self.actual_outcome,
+            "resolution_timestamp": self.resolution_timestamp,
         }
 
     def __repr__(self):
@@ -44,9 +50,7 @@ class Prediction:
 
     def to_json(self) -> str:
         """Serialize the predictions to JSON."""
-        return json.dumps(
-            {pid: pred.to_dict() for pid, pred in self.predictions.items()}, indent=4
-        )
+        return json.dumps(self.to_dict(), indent=4)
 
 class PredictionDatabase:
     """
@@ -238,18 +242,32 @@ class PredictionDatabase:
 
             self.predictions = []
             for pred_dict in data["predictions"]:
+                match_id = pred_dict.get("matchId") or pred_dict.get("match_id")
+                predicted_outcome = pred_dict.get("prediction") or pred_dict.get(
+                    "predictedOutcome"
+                ) or pred_dict.get("predicted_outcome")
+                prediction_id = pred_dict.get("predictionId") or pred_dict.get(
+                    "prediction_id"
+                )
+                actual_outcome = pred_dict.get("actualOutcome") or pred_dict.get(
+                    "actual_outcome"
+                )
+                resolution_ts = pred_dict.get("resolutionTimestamp") or pred_dict.get(
+                    "resolution_timestamp"
+                )
+
                 pred = Prediction(
-                    match_id=pred_dict["matchId"],
-                    predicted_outcome=pred_dict["prediction"],
+                    match_id=match_id,
+                    predicted_outcome=predicted_outcome,
                     confidence=pred_dict["confidence"],
                     factors=pred_dict["factors"],
                     timestamp=pred_dict["timestamp"],
-                    prediction_id=pred_dict["predictionId"],
+                    prediction_id=prediction_id,
                 )
                 pred.resolved = pred_dict["resolved"]
-                pred.actual_outcome = pred_dict["actualOutcome"]
+                pred.actual_outcome = actual_outcome
                 pred.correct = pred_dict["correct"]
-                pred.resolution_timestamp = pred_dict["resolutionTimestamp"]
+                pred.resolution_timestamp = resolution_ts
 
                 self.predictions.append(pred)
 
