@@ -256,7 +256,7 @@ export DATABASE_URL=postgresql://user:pass@host/db
 - ✅ Better concurrency
 - ✅ Auto-backups on Render/Railway
 
-The backend requires `DATABASE_URL`.
+The backend requires `DATABASE_URL`
 
 ---
 
