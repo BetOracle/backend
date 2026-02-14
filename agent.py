@@ -122,16 +122,31 @@ class FootyOracleAgent:
         """Check if match is within prediction window"""
 
         try:
-            match_date = datetime.strptime(match["date"], "%Y-%m-%d")
+            # Parse match date and time if available
+            match_date_str = match["date"]
+            match_time_str = match.get("time", "12:00")
+
+            # Combine date and time
+            match_datetime_str = f"{match_date_str} {match_time_str}"
+            match_datetime = datetime.strptime(match_datetime_str, "%Y-%m-%d %H:%M")
+
             now = datetime.now()
+            hours_until_match = (match_datetime - now).total_seconds() / 3600
 
-            hours_until_match = (match_date - now).total_seconds() / 3600
+            # Predict if match is within window (including matches happening soon)
+            # Allow predictions up to 2 hours before match starts
+            return -2 <= hours_until_match <= self.prediction_window_hours
 
-            # Predict if match is within window and hasn't happened yet
-            return 0 < hours_until_match <= self.prediction_window_hours
+        except Exception as e:
+            # Fallback to date-only comparison
+            try:
+                match_date = datetime.strptime(match["date"], "%Y-%m-%d")
+                now = datetime.now()
+                hours_until_match = (match_date - now).total_seconds() / 3600
 
-        except Exception:
-            return False
+                return -24 <= hours_until_match <= self.prediction_window_hours
+            except:
+                return False
 
     def _already_predicted(self, match_id: str) -> bool:
         """Check if we already have a prediction for this match"""

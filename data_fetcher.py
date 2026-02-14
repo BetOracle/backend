@@ -486,7 +486,8 @@ class DataFetcher:
 
             matches = []
             for match in data["matches"]:
-                if match["status"] == "SCHEDULED":
+                # Include both SCHEDULED and TIMED matches
+                if match["status"] in ["SCHEDULED", "TIMED"]:
                     match_date = datetime.fromisoformat(
                         match["utcDate"].replace("Z", "+00:00")
                     )
