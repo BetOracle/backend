@@ -14,5 +14,8 @@ schedule==1.2.0
 # PostgreSQL
 psycopg[binary]==3.2.13
 
+# Production server
+gunicorn==22.0.0
+
 # Development Tools
 pytest==7.4.4
