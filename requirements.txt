@@ -11,8 +11,8 @@ python-dotenv==1.0.0
 # Scheduler for autonomous agent
 schedule==1.2.0
 
-# PostgreSQL (optional - used when DATABASE_URL is set)
-psycopg2-binary==2.9.9
+# PostgreSQL
+psycopg[binary]==3.2.3
 
 # Development Tools
 pytest==7.4.4
