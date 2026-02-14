@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import List, Optional, Dict
 import json
+import os
+import threading
 
 class Prediction:
     """Prediction model for football matches."""
@@ -59,8 +61,63 @@ class PredictionDatabase:
     """
 
     def __init__(self):
-        self.predictions: List[Prediction] = []
-        self._id_counter = 1
+        self.database_url = os.getenv("DATABASE_URL", "").strip()
+        if not self.database_url:
+            raise RuntimeError(
+                "DATABASE_URL is required (PostgreSQL). Set DATABASE_URL in your environment."
+            )
+
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+
+        self._real_dict_cursor = RealDictCursor
+        self._conn = psycopg2.connect(self.database_url)
+
+        self._lock = threading.Lock()
+        self._init_schema()
+
+    def _init_schema(self):
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS predictions (
+                    prediction_id TEXT PRIMARY KEY,
+                    match_id TEXT NOT NULL,
+                    predicted_outcome TEXT NOT NULL,
+                    confidence DOUBLE PRECISION NOT NULL,
+                    factors_json JSONB NOT NULL,
+                    timestamp BIGINT NOT NULL,
+                    resolved BOOLEAN NOT NULL DEFAULT FALSE,
+                    actual_outcome TEXT,
+                    correct BOOLEAN,
+                    resolution_timestamp BIGINT
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_predictions_match_id ON predictions(match_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_predictions_resolved ON predictions(resolved)"
+            )
+
+            self._conn.commit()
+
+    def _row_to_prediction(self, row) -> Prediction:
+        pred = Prediction(
+            match_id=row["match_id"],
+            predicted_outcome=row["predicted_outcome"],
+            confidence=row["confidence"],
+            factors=row["factors_json"],
+            timestamp=row["timestamp"],
+            prediction_id=row["prediction_id"],
+        )
+        pred.resolved = bool(row["resolved"])
+        pred.actual_outcome = row["actual_outcome"]
+        pred.correct = None if row["correct"] is None else bool(row["correct"])
+        pred.resolution_timestamp = row["resolution_timestamp"]
+        return pred
 
     def add_prediction(self, prediction: Prediction) -> str:
         """
@@ -73,12 +130,56 @@ class PredictionDatabase:
             prediction_id
         """
 
-        # Assign ID if not set
         if not prediction.prediction_id:
-            prediction.prediction_id = f"offchain-{self._id_counter}"
-            self._id_counter += 1
+            prediction.prediction_id = prediction.generate_prediction_id()
 
-        self.predictions.append(prediction)
+        with self._lock:
+            cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+            if prediction.correct is None:
+                correct_value = None
+            else:
+                correct_value = bool(prediction.correct)
+
+            cur.execute(
+                """
+                INSERT INTO predictions (
+                    prediction_id,
+                    match_id,
+                    predicted_outcome,
+                    confidence,
+                    factors_json,
+                    timestamp,
+                    resolved,
+                    actual_outcome,
+                    correct,
+                    resolution_timestamp
+                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                ON CONFLICT (prediction_id) DO UPDATE SET
+                    match_id = EXCLUDED.match_id,
+                    predicted_outcome = EXCLUDED.predicted_outcome,
+                    confidence = EXCLUDED.confidence,
+                    factors_json = EXCLUDED.factors_json,
+                    timestamp = EXCLUDED.timestamp,
+                    resolved = EXCLUDED.resolved,
+                    actual_outcome = EXCLUDED.actual_outcome,
+                    correct = EXCLUDED.correct,
+                    resolution_timestamp = EXCLUDED.resolution_timestamp
+                """,
+                (
+                    prediction.prediction_id,
+                    prediction.match_id,
+                    prediction.predicted_outcome,
+                    float(prediction.confidence),
+                    json.dumps(prediction.factors),
+                    int(prediction.timestamp),
+                    bool(prediction.resolved),
+                    prediction.actual_outcome,
+                    correct_value,
+                    prediction.resolution_timestamp,
+                ),
+            )
+
+            self._conn.commit()
 
         return prediction.prediction_id
 
@@ -88,29 +189,45 @@ class PredictionDatabase:
 
     def get_prediction(self, prediction_id: str) -> Optional[Prediction]:
         """Get prediction by its ID."""
-        for pred in self.predictions:
-            if pred.prediction_id == prediction_id:
-                return pred
-        return None
+        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur.execute(
+            "SELECT * FROM predictions WHERE prediction_id = %s", (prediction_id,)
+        )
+        row = cur.fetchone()
+        return self._row_to_prediction(row) if row else None
 
     def get_prediction_by_match_id(self, match_id: str) -> Optional[Prediction]:
         """Get prediction by match ID."""
-        for pred in self.predictions:
-            if pred.match_id == match_id:
-                return pred
-        return None
+        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur.execute("SELECT * FROM predictions WHERE match_id = %s", (match_id,))
+        row = cur.fetchone()
+        return self._row_to_prediction(row) if row else None
 
     def get_all_predictions(self) -> List[Prediction]:
         """Get all predictions in the database."""
-        return self.predictions.copy()
+        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur.execute("SELECT * FROM predictions ORDER BY timestamp DESC")
+        rows = cur.fetchall()
+        return [self._row_to_prediction(r) for r in rows]
 
     def get_unresolved_predictions(self) -> List[Prediction]:
         """Get all unresolved predictions."""
-        return [p for p in self.predictions if not p.resolved]
+        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur.execute(
+            "SELECT * FROM predictions WHERE resolved = FALSE ORDER BY timestamp DESC"
+        )
+        rows = cur.fetchall()
+        return [self._row_to_prediction(r) for r in rows]
 
     def get_predictions_by_league(self, league: str) -> List[Prediction]:
         """Get predictions for a specific league."""
-        return [p for p in self.predictions if league in p.match_id]
+        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur.execute(
+            "SELECT * FROM predictions WHERE match_id LIKE %s ORDER BY timestamp DESC",
+            (f"{league}%",),
+        )
+        rows = cur.fetchall()
+        return [self._row_to_prediction(r) for r in rows]
 
     # =========================================================================
     # UPDATE
@@ -131,17 +248,29 @@ class PredictionDatabase:
             True if successful, False if not found
         """
 
-        prediction = self.get_prediction(prediction_id)
+        resolution_timestamp = int(datetime.now().timestamp())
 
-        if not prediction:
-            return False
+        with self._lock:
+            cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+            cur.execute(
+                """
+                UPDATE predictions
+                SET resolved = TRUE,
+                    actual_outcome = %s,
+                    correct = %s,
+                    resolution_timestamp = %s
+                WHERE prediction_id = %s
+                """,
+                (
+                    actual_outcome,
+                    bool(correct),
+                    resolution_timestamp,
+                    prediction_id,
+                ),
+            )
+            self._conn.commit()
 
-        prediction.resolved = True
-        prediction.actual_outcome = actual_outcome
-        prediction.correct = correct
-        prediction.resolution_timestamp = int(datetime.now().timestamp())
-
-        return True
+        return cur.rowcount > 0
 
     # =========================================================================
     # DELETE
@@ -149,18 +278,23 @@ class PredictionDatabase:
 
     def delete_prediction(self, prediction_id: str) -> bool:
         """Delete a prediction by its ID."""
-        for i, pred in enumerate(self.predictions):
-            if pred.prediction_id == prediction_id:
-                self.predictions.pop(i)
-                return True
-        return False
+        with self._lock:
+            cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+            cur.execute(
+                "DELETE FROM predictions WHERE prediction_id = %s",
+                (prediction_id,),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
 
     def clear_all(self):
         """
         Clear all predictions (use with caution!)
         """
-        self.predictions = []
-        self._id_counter = 1
+        with self._lock:
+            cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+            cur.execute("DELETE FROM predictions")
+            self._conn.commit()
 
     # =========================================================================
     # STATISTICS
@@ -181,10 +315,18 @@ class PredictionDatabase:
             }
         """
 
-        total = len(self.predictions)
-        resolved = sum(1 for p in self.predictions if p.resolved)
+        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur.execute("SELECT COUNT(*) AS c FROM predictions")
+        total = int(cur.fetchone()["c"])
+
+        cur.execute("SELECT COUNT(*) AS c FROM predictions WHERE resolved = TRUE")
+        resolved = int(cur.fetchone()["c"])
         pending = total - resolved
-        correct = sum(1 for p in self.predictions if p.resolved and p.correct)
+
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM predictions WHERE resolved = TRUE AND correct = TRUE"
+        )
+        correct = int(cur.fetchone()["c"])
         incorrect = resolved - correct
 
         accuracy = (correct / resolved * 100) if resolved > 0 else 0.0
@@ -195,17 +337,33 @@ class PredictionDatabase:
             "pending": pending,
             "correct": correct,
             "incorrect": incorrect,
-            "accuracy": round(accuracy, 1)
+            "accuracy": round(accuracy, 1),
         }
 
     def get_league_statistics(self, league: str) -> dict:
         """Get statistics for specific league"""
-        predictions = self.get_predictions_by_league(league)
+        cur = self._conn.cursor(cursor_factory=self._real_dict_cursor)
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM predictions WHERE match_id LIKE %s",
+            (f"{league}%",),
+        )
+        total = int(cur.fetchone()["c"])
 
-        total = len(predictions)
-        resolved = sum(1 for p in predictions if p.resolved)
-        correct = sum(1 for p in predictions if p.resolved and p.correct)
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM predictions WHERE match_id LIKE %s AND resolved = TRUE",
+            (f"{league}%",),
+        )
+        resolved = int(cur.fetchone()["c"])
 
+        cur.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM predictions
+            WHERE match_id LIKE %s AND resolved = TRUE AND correct = TRUE
+            """,
+            (f"{league}%",),
+        )
+        correct = int(cur.fetchone()["c"])
         accuracy = (correct / resolved * 100) if resolved > 0 else 0.0
 
         return {
@@ -215,7 +373,7 @@ class PredictionDatabase:
             "pending": total - resolved,
             "correct": correct,
             "incorrect": resolved - correct,
-            "accuracy": round(accuracy, 1)
+            "accuracy": round(accuracy, 1),
         }
 
     # =========================================================================
@@ -224,15 +382,15 @@ class PredictionDatabase:
 
     def save_to_file(self, filename: str = "predictions.json"):
         """Save predictions to JSON file"""
+        predictions = self.get_all_predictions()
         data = {
-            "predictions": [p.to_dict() for p in self.predictions],
-            "id_counter": self._id_counter,
+            "predictions": [p.to_dict() for p in predictions],
         }
 
         with open(filename, "w") as f:
             json.dump(data, f, indent=2)
 
-        print(f"✅ Saved {len(self.predictions)} predictions to {filename}")
+        print(f"✅ Saved {len(predictions)} predictions to {filename}")
 
     def load_from_file(self, filename: str = "predictions.json"):
         """Load predictions from JSON file"""
@@ -240,7 +398,6 @@ class PredictionDatabase:
             with open(filename, "r") as f:
                 data = json.load(f)
 
-            self.predictions = []
             for pred_dict in data["predictions"]:
                 match_id = pred_dict.get("matchId") or pred_dict.get("match_id")
                 predicted_outcome = pred_dict.get("prediction") or pred_dict.get(
@@ -269,11 +426,11 @@ class PredictionDatabase:
                 pred.correct = pred_dict["correct"]
                 pred.resolution_timestamp = resolution_ts
 
-                self.predictions.append(pred)
+                self.add_prediction(pred)
 
-            self._id_counter = data.get("id_counter", len(self.predictions) + 1)
-
-            print(f"✅ Loaded {len(self.predictions)} predictions from {filename}")
+            print(
+                f"✅ Loaded {len(data.get('predictions', []))} predictions from {filename}"
+            )
 
         except FileNotFoundError:
             print(f"⚠️  File {filename} not found, starting with empty database")
