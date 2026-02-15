@@ -3,6 +3,7 @@ from typing import List, Optional, Dict
 import json
 import os
 import threading
+import psycopg
 
 class Prediction:
     """Prediction model for football matches."""
@@ -94,6 +95,12 @@ class PredictionDatabase:
                 )
                 """
             )
+            try:
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_match_id ON predictions(match_id)"
+                )
+            except psycopg.Error:
+                pass
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_predictions_match_id ON predictions(match_id)"
             )
@@ -153,16 +160,13 @@ class PredictionDatabase:
                     correct,
                     resolution_timestamp
                 ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
-                ON CONFLICT (prediction_id) DO UPDATE SET
-                    match_id = EXCLUDED.match_id,
+                ON CONFLICT (match_id) DO UPDATE SET
                     predicted_outcome = EXCLUDED.predicted_outcome,
                     confidence = EXCLUDED.confidence,
                     factors_json = EXCLUDED.factors_json,
-                    timestamp = EXCLUDED.timestamp,
-                    resolved = EXCLUDED.resolved,
-                    actual_outcome = EXCLUDED.actual_outcome,
-                    correct = EXCLUDED.correct,
-                    resolution_timestamp = EXCLUDED.resolution_timestamp
+                    timestamp = EXCLUDED.timestamp
+                WHERE predictions.resolved = FALSE
+                RETURNING prediction_id
                 """,
                 (
                     prediction.prediction_id,
@@ -178,9 +182,17 @@ class PredictionDatabase:
                 ),
             )
 
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "SELECT prediction_id FROM predictions WHERE match_id = %s",
+                    (prediction.match_id,),
+                )
+                row = cur.fetchone()
+
             self._conn.commit()
 
-        return prediction.prediction_id
+        return row["prediction_id"]
 
     # =========================================================================
     # READ
