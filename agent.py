@@ -233,6 +233,55 @@ class FootyOracleAgent:
         except Exception as e:
             print(f"      ⚠️  Backend unreachable: {e}")
 
+    def _auto_resolve_via_backend(self) -> None:
+        max_loops = 30
+        batch_size = 5
+        time_budget_seconds = 15
+        loops = 0
+        total_resolved = 0
+
+        while loops < max_loops:
+            loops += 1
+            try:
+                response = requests.post(
+                    f"{self.backend_url}/api/resolve/auto",
+                    params={
+                        "max": str(batch_size),
+                        "timeBudgetSeconds": str(time_budget_seconds),
+                    },
+                    timeout=30,
+                )
+            except Exception as e:
+                print(f"❌ Error in resolution cycle: {e}")
+                return
+
+            if response.status_code != 200:
+                print(
+                    f"❌ Backend auto-resolve failed: {response.status_code} {response.text}"
+                )
+                return
+
+            payload = response.json()
+            batch_resolved = int(payload.get("resolved", 0))
+            remaining = int(payload.get("remaining", 0))
+            processed = int(payload.get("processed", 0))
+            total_resolved += batch_resolved
+
+            print(
+                f"   Auto-resolve batch: processed={processed}, resolved={batch_resolved}, remaining={remaining}"
+            )
+
+            if remaining <= 0:
+                break
+
+            if processed <= 0:
+                print("   Auto-resolve made no progress; stopping")
+                break
+
+            time.sleep(1)
+
+        print(f"\n✅ Auto-resolve completed: resolved={total_resolved}")
+
     def run_resolution_cycle(self):
         """
         Resolve pending predictions:
@@ -249,10 +298,7 @@ class FootyOracleAgent:
 
         try:
             if not self.db:
-                try:
-                    requests.post(f"{self.backend_url}/api/resolve/auto")
-                except Exception as e:
-                    print(f"❌ Error in resolution cycle: {e}")
+                self._auto_resolve_via_backend()
                 return
 
             unresolved = self.db.get_unresolved_predictions()
