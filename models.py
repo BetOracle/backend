@@ -28,7 +28,6 @@ class Prediction:
             "predictionId": self.prediction_id,
             "matchId": self.match_id,
             "prediction": self.predicted_outcome,
-            "predictedOutcome": self.predicted_outcome,
             "confidence": self.confidence,
             "factors": self.factors,
             "timestamp": self.timestamp,
@@ -36,11 +35,6 @@ class Prediction:
             "actualOutcome": self.actual_outcome,
             "correct": self.correct,
             "resolutionTimestamp": self.resolution_timestamp,
-            "prediction_id": self.prediction_id,
-            "match_id": self.match_id,
-            "predicted_outcome": self.predicted_outcome,
-            "actual_outcome": self.actual_outcome,
-            "resolution_timestamp": self.resolution_timestamp,
         }
 
     def __repr__(self):
