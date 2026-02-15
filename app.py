@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
 import os
+import time
 from dotenv import load_dotenv
 
 from prediction_engine import PredictionEngine
@@ -302,27 +303,71 @@ def auto_resolve():
     try:
         unresolved = db.get_unresolved_predictions()
         results = []
+        errors = []
+
+        try:
+            max_items = int(request.args.get("max", "10"))
+        except ValueError:
+            max_items = 10
+
+        try:
+            time_budget_seconds = float(request.args.get("timeBudgetSeconds", "20"))
+        except ValueError:
+            time_budget_seconds = 20.0
+
+        if max_items < 1:
+            max_items = 1
+
+        started = time.monotonic()
+        processed = 0
 
         for prediction in unresolved:
-            # Fetch actual result from API
-            actual_outcome = resolver.get_match_result(prediction.match_id)
+            if processed >= max_items:
+                break
+            if (time.monotonic() - started) >= time_budget_seconds:
+                break
 
-            if actual_outcome:
-                is_correct = prediction.predicted_outcome == actual_outcome
-                db.resolve_prediction(
-                    prediction.prediction_id, actual_outcome, is_correct
-                )
-
-                results.append(
+            try:
+                actual_outcome = resolver.get_match_result(prediction.match_id)
+            except Exception as e:
+                errors.append(
                     {
                         "matchId": prediction.match_id,
                         "predictionId": prediction.prediction_id,
-                        "correct": is_correct,
+                        "error": str(e),
                     }
                 )
+                processed += 1
+                continue
 
+            if not actual_outcome:
+                processed += 1
+                continue
+
+            is_correct = prediction.predicted_outcome == actual_outcome
+            db.resolve_prediction(prediction.prediction_id, actual_outcome, is_correct)
+
+            results.append(
+                {
+                    "matchId": prediction.match_id,
+                    "predictionId": prediction.prediction_id,
+                    "correct": is_correct,
+                }
+            )
+            processed += 1
+
+        remaining = max(0, len(unresolved) - processed)
         return (
-            jsonify({"success": True, "resolved": len(results), "results": results}),
+            jsonify(
+                {
+                    "success": True,
+                    "resolved": len(results),
+                    "processed": processed,
+                    "remaining": remaining,
+                    "results": results,
+                    "errors": errors,
+                }
+            ),
             200,
         )
 

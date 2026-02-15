@@ -68,7 +68,7 @@ See `docs/DEPLOY_RENDER.md`.
 
 ## 👥 Team
 
-**Backend & Agent:** Your implementation  
+**Backend & Agent:** Pope  
 **Smart Contracts:** Nnenna (ERC-8004 integration)  
 **Frontend:** Lynn (Dashboard UI)
 
