@@ -26,6 +26,31 @@ db = PredictionDatabase()
 # ============================================================================
 
 
+@app.route("/api/matches", methods=["GET"])
+def get_upcoming_matches():
+    try:
+        league = request.args.get("league")
+        if not league:
+            return (
+                jsonify({"success": False, "error": "Missing required query param: league"}),
+                400,
+            )
+
+        try:
+            days_ahead = int(request.args.get("daysAhead", "7"))
+        except ValueError:
+            days_ahead = 7
+
+        matches = prediction_engine.data_fetcher.get_league_matches(
+            league=league, days_ahead=days_ahead
+        )
+
+        return jsonify({"success": True, "league": league, "matches": matches}), 200
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/predict", methods=["POST"])
 def create_prediction():
     """
@@ -94,10 +119,16 @@ def create_prediction():
                 )
 
         # Generate prediction
+        match_id = data.get("matchId")
+        fixture_id = data.get("fixtureId")
+        if not match_id and fixture_id is not None and str(fixture_id).isdigit():
+            match_id = f"{data['league']}-{int(fixture_id)}"
+
         prediction_result = prediction_engine.predict(
             home_team=data["homeTeam"],
             away_team=data["awayTeam"],
             league=data["league"],
+            match_id=match_id,
         )
 
         # Create prediction object

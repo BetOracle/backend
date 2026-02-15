@@ -180,6 +180,10 @@ class FootyOracleAgent:
     def _generate_match_id(self, match: dict, league: str) -> str:
         """Generate match ID from match data"""
 
+        fixture_id = match.get("fixtureId")
+        if fixture_id is not None and str(fixture_id).isdigit():
+            return f"{league}-{int(fixture_id)}"
+
         home_abbr = match["homeTeam"][:3].upper()
         away_abbr = match["awayTeam"][:3].upper()
         date_str = match["date"]

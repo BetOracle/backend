@@ -29,7 +29,7 @@ class PredictionEngine:
             "position": 0.25,  # Table position weight
         }
 
-    def predict(self, home_team: str, away_team: str, league: str) -> dict:
+    def predict(self, home_team: str, away_team: str, league: str, match_id: str = None) -> dict:
         """
         Generate prediction for a match
 
@@ -48,8 +48,9 @@ class PredictionEngine:
             }
         """
 
-        # Generate match ID
-        match_id = self._generate_match_id(home_team, away_team, league)
+        # Generate match ID (or accept a stable fixture-based id)
+        if not match_id:
+            match_id = self._generate_match_id(home_team, away_team, league)
 
         # Calculate individual factors
         form_score = self._calculate_form_score(home_team, away_team, league)

@@ -549,6 +549,77 @@ class DataFetcher:
     # MATCH RESULTS
     # =========================================================================
 
+    def _outcome_from_score(self, home_score: int, away_score: int) -> str:
+        if home_score > away_score:
+            return "HOME_WIN"
+        if away_score > home_score:
+            return "AWAY_WIN"
+        return "DRAW"
+
+    def _try_parse_fixture_match_id(self, match_id: str) -> Optional[int]:
+        parts = match_id.split("-")
+        if len(parts) != 2:
+            return None
+        fixture_part = parts[1]
+        if not fixture_part.isdigit():
+            return None
+        return int(fixture_part)
+
+    def _get_match_result_by_fixture_id(self, fixture_id: int) -> Optional[str]:
+        headers = {"X-Auth-Token": self.football_api_key}
+        url = f"{self.football_api_url}/matches/{fixture_id}"
+        data = self._make_request(url, headers, f"match_{fixture_id}")
+
+        if not data or "match" not in data:
+            self._strict_fail("No match returned for fixture lookup")
+            return self.mock.get_match_result(f"fixture-{fixture_id}")
+
+        match = data["match"]
+        if match.get("status") != "FINISHED":
+            return None
+
+        home_score = match["score"]["fullTime"]["home"]
+        away_score = match["score"]["fullTime"]["away"]
+        return self._outcome_from_score(home_score, away_score)
+
+    def _get_match_result_by_legacy_id(self, match_id: str) -> Optional[str]:
+        parts = match_id.split("-")
+        if len(parts) < 4:
+            self._strict_fail("Invalid match_id format")
+            return self.mock.get_match_result(match_id)
+
+        league = parts[0]
+        home_abbr = parts[1].strip().upper()
+        away_abbr = parts[2].strip().upper()
+        date_str = "-".join(parts[3:])
+
+        league_id = self._get_league_id(league, "football_data")
+        headers = {"X-Auth-Token": self.football_api_key}
+        url = f"{self.football_api_url}/competitions/{league_id}/matches?dateFrom={date_str}&dateTo={date_str}"
+        data = self._make_request(url, headers, f"result_{match_id}")
+
+        if not data or "matches" not in data:
+            self._strict_fail("No matches returned for result lookup")
+            return self.mock.get_match_result(match_id)
+
+        for match in data["matches"]:
+            if match.get("status") != "FINISHED":
+                continue
+
+            match_home = match["homeTeam"]["name"]
+            match_away = match["awayTeam"]["name"]
+            match_home_abbr = match_home[:3].strip().upper()
+            match_away_abbr = match_away[:3].strip().upper()
+
+            if match_home_abbr != home_abbr or match_away_abbr != away_abbr:
+                continue
+
+            home_score = match["score"]["fullTime"]["home"]
+            away_score = match["score"]["fullTime"]["away"]
+            return self._outcome_from_score(home_score, away_score)
+
+        return None
+
     def get_match_result(self, match_id: str) -> Optional[str]:
         """
         Get match result
@@ -566,33 +637,11 @@ class DataFetcher:
             return self.mock.get_match_result(match_id)
 
         try:
-            parts = match_id.split("-")
-            league = parts[0]
-            date_str = "-".join(parts[3:])
+            fixture_id = self._try_parse_fixture_match_id(match_id)
+            if fixture_id is not None:
+                return self._get_match_result_by_fixture_id(fixture_id)
 
-            league_id = self._get_league_id(league, "football_data")
-
-            url = f"{self.football_api_url}/competitions/{league_id}/matches?dateFrom={date_str}&dateTo={date_str}"
-            headers = {"X-Auth-Token": self.football_api_key}
-            data = self._make_request(url, headers, f"result_{match_id}")
-
-            if not data or "matches" not in data:
-                self._strict_fail("No matches returned for result lookup")
-                return self.mock.get_match_result(match_id)
-
-            for match in data["matches"]:
-                if match["status"] == "FINISHED":
-                    home_score = match["score"]["fullTime"]["home"]
-                    away_score = match["score"]["fullTime"]["away"]
-
-                    if home_score > away_score:
-                        return "HOME_WIN"
-                    elif away_score > home_score:
-                        return "AWAY_WIN"
-                    else:
-                        return "DRAW"
-
-            return None
+            return self._get_match_result_by_legacy_id(match_id)
 
         except Exception as e:
             if not self.strict_real_data:
@@ -652,6 +701,7 @@ class DataFetcher:
 
                     matches.append(
                         {
+                            "fixtureId": match.get("id"),
                             "homeTeam": match["homeTeam"]["name"],
                             "awayTeam": match["awayTeam"]["name"],
                             "date": match_date.strftime("%Y-%m-%d"),
