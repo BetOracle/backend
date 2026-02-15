@@ -105,7 +105,7 @@ class FootyOracleAgent:
 
             # Generate prediction
             try:
-                prediction = self._generate_prediction(match, league)
+                prediction = self._generate_prediction(match, league, match_id)
 
                 # Record prediction (local + backend)
                 self._record_prediction(prediction)
@@ -190,11 +190,14 @@ class FootyOracleAgent:
 
         return f"{league}-{home_abbr}-{away_abbr}-{date_str}"
 
-    def _generate_prediction(self, match: dict, league: str) -> dict:
+    def _generate_prediction(self, match: dict, league: str, match_id: str) -> dict:
         """Generate prediction for a match"""
 
         prediction = self.prediction_engine.predict(
-            home_team=match["homeTeam"], away_team=match["awayTeam"], league=league
+            home_team=match["homeTeam"],
+            away_team=match["awayTeam"],
+            league=league,
+            match_id=match_id,
         )
 
         return prediction
