@@ -8,13 +8,40 @@ All responses are JSON.
 
 ---
 
+### List upcoming matches (for stable fixture ids)
+`GET /api/matches`
+
+Query params:
+- `league` (required) e.g. `EPL`, `LaLiga`, `Bundesliga`, `Ligue1`
+- `daysAhead` (optional) default `7`
+
+Response:
+
+```json
+{
+  "success": true,
+  "league": "EPL",
+  "matches": [
+    {
+      "fixtureId": 123456,
+      "homeTeam": "Arsenal",
+      "awayTeam": "Chelsea",
+      "date": "2026-02-13",
+      "time": "15:00"
+    }
+  ]
+}
+```
+
+---
+
 ## Data model (Prediction)
 A prediction returned by the API includes:
 
 ```json
 {
   "predictionId": "offchain-1700000000",
-  "matchId": "EPL-ARS-CHE-2026-02-13",
+  "matchId": "EPL-123456",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
   "factors": {
@@ -35,6 +62,7 @@ Notes:
 - `confidence` is a 0..1 float.
 - `resolved` is boolean.
 - `actualOutcome`, `correct`, `resolutionTimestamp` are present when resolved.
+- `matchId` is stable when created from a fixture id: `{league}-{fixtureId}`.
 
 ---
 
@@ -69,7 +97,7 @@ Response:
   "predictions": [
     {
       "predictionId": "offchain-1700000000",
-      "matchId": "EPL-ARS-CHE-2026-02-13",
+      "matchId": "EPL-123456",
       "prediction": "HOME_WIN",
       "confidence": 0.74,
       "factors": {},
@@ -94,7 +122,8 @@ Request (user-driven):
 {
   "homeTeam": "Arsenal",
   "awayTeam": "Chelsea",
-  "league": "EPL"
+  "league": "EPL",
+  "fixtureId": 123456
 }
 ```
 
@@ -104,7 +133,7 @@ Response:
 {
   "success": true,
   "predictionId": "offchain-1700000000",
-  "matchId": "EPL-ARS-CHE-2026-02-13",
+  "matchId": "EPL-123456",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
   "factors": {
@@ -126,7 +155,7 @@ Request (agent payload):
 
 ```json
 {
-  "matchId": "EPL-ARS-CHE-2026-02-13",
+  "matchId": "EPL-123456",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
   "factors": {
@@ -171,7 +200,7 @@ Request:
 
 ```json
 {
-  "matchId": "EPL-ARS-CHE-2026-02-13",
+  "matchId": "EPL-123456",
   "actualOutcome": "HOME_WIN"
 }
 ```
@@ -181,7 +210,7 @@ Response:
 ```json
 {
   "success": true,
-  "matchId": "EPL-ARS-CHE-2026-02-13",
+  "matchId": "EPL-123456",
   "actualOutcome": "HOME_WIN",
   "correct": true
 }
