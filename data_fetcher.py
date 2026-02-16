@@ -157,6 +157,45 @@ class DataFetcher:
         except ValueError:
             return 6.0
 
+    def _should_raise_on_real_api_failure(self) -> bool:
+        return self.strict_real_data and not self.mock_mode
+
+    def _handle_rate_limit(self, url: str, headers: Dict, cache_key: Optional[str]) -> Optional[Dict]:
+        print("⚠️  Rate limit exceeded")
+        time.sleep(max(0.0, self._backoff_seconds_from_response(self._last_response)))
+
+        retry_response = self._request_once(url, headers)
+        if retry_response.status_code == 200:
+            data = retry_response.json()
+            self._set_cache(cache_key, data)
+            return data
+
+        if self._should_raise_on_real_api_failure():
+            raise RuntimeError(
+                f"API rate limit exceeded (429). Last response: {retry_response.text}"
+            )
+        return None
+
+    def _handle_non_200(self, response: requests.Response) -> Optional[Dict]:
+        if response.status_code in (401, 403):
+            if self._should_raise_on_real_api_failure():
+                raise RuntimeError(
+                    f"API auth error ({response.status_code}). Response: {response.text}"
+                )
+            print(f"⚠️  API auth error {response.status_code}: {response.text}")
+            return None
+
+        if response.status_code == 404:
+            return None
+
+        if self._should_raise_on_real_api_failure():
+            raise RuntimeError(
+                f"API error ({response.status_code}). Response: {response.text}"
+            )
+
+        print(f"⚠️  API error {response.status_code}: {response.text}")
+        return None
+
     def _make_request(
         self, url: str, headers: Dict, cache_key: str = None
     ) -> Optional[Dict]:
@@ -183,19 +222,10 @@ class DataFetcher:
                 return data
 
             if response.status_code == 429:
-                print("⚠️  Rate limit exceeded")
-                time.sleep(max(0.0, self._backoff_seconds_from_response(response)))
+                self._last_response = response
+                return self._handle_rate_limit(url, headers, cache_key)
 
-                retry_response = self._request_once(url, headers)
-                if retry_response.status_code == 200:
-                    data = retry_response.json()
-                    self._set_cache(cache_key, data)
-                    return data
-
-                return None
-
-            print(f"⚠️  API error {response.status_code}")
-            return None
+            return self._handle_non_200(response)
 
         except Exception as e:
             print(f"❌ Request failed: {e}")
@@ -354,19 +384,18 @@ class DataFetcher:
         if self.mock_mode:
             return self.mock.get_injuries(team_name)
         if not self.rapidapi_key:
-            self._strict_fail(_MISSING_RAPIDAPI_KEY)
-            return self.mock.get_injuries(team_name)
+            return []
 
         try:
-            # Get team ID for RapidAPI
             league_id = self._get_league_id(league, "rapidapi")
             team_id = self._get_team_id_rapidapi(team_name, league_id)
 
             if not team_id:
-                self._strict_fail(f"Could not resolve RapidAPI team id for '{team_name}'")
-                return self.mock.get_injuries(team_name)
+                self._strict_fail(
+                    f"Could not resolve RapidAPI team id for '{team_name}'"
+                )
+                return []
 
-            # Fetch injuries from RapidAPI
             url = f"{self.rapidapi_url}/injuries?season={self.rapidapi_season}&team={team_id}"
             headers = {
                 "X-RapidAPI-Key": self.rapidapi_key,
@@ -377,23 +406,17 @@ class DataFetcher:
 
             if not data or "response" not in data:
                 self._strict_fail("No injuries returned")
-                return self.mock.get_injuries(team_name)
+                return []
 
-            # Parse injuries
             injuries = []
             for injury in data["response"]:
                 player_name = injury.get("player", {}).get("name", "Unknown")
                 injury_type = injury.get("player", {}).get("type", "Unknown")
                 reason = injury.get("player", {}).get("reason", "")
 
-                # Determine severity from injury type/reason
-                if any(
-                    word in reason.lower() for word in ["fracture", "torn", "rupture"]
-                ):
+                if any(word in reason.lower() for word in ["fracture", "torn", "rupture"]):
                     severity = "severe"
-                elif any(
-                    word in reason.lower() for word in ["strain", "sprain", "knock"]
-                ):
+                elif any(word in reason.lower() for word in ["strain", "sprain", "knock"]):
                     severity = "moderate"
                 else:
                     severity = "minor"
@@ -414,7 +437,7 @@ class DataFetcher:
             if not self.strict_real_data:
                 print(f"Error fetching injuries: {e}")
             self._strict_fail(f"Error fetching injuries: {e}")
-            return self.mock.get_injuries(team_name)
+            return []
 
     def _get_team_id_rapidapi(self, team_name: str, league_id: int) -> Optional[int]:
         """Get team ID from RapidAPI"""
@@ -570,11 +593,23 @@ class DataFetcher:
         url = f"{self.football_api_url}/matches/{fixture_id}"
         data = self._make_request(url, headers, f"match_{fixture_id}")
 
-        if not data or "match" not in data:
-            self._strict_fail("No match returned for fixture lookup")
-            return self.mock.get_match_result(f"fixture-{fixture_id}")
+        if not data:
+            if self.strict_real_data and not self.mock_mode:
+                raise RuntimeError("Fixture lookup failed (no data returned)")
+            return None
 
-        match = data["match"]
+        match = data.get("match") if isinstance(data, dict) else None
+        if match is None:
+            match = data
+
+        if not isinstance(match, dict) or "status" not in match or "score" not in match:
+            if self.strict_real_data and not self.mock_mode:
+                keys = list(data.keys()) if isinstance(data, dict) else type(data)
+                raise RuntimeError(
+                    f"Fixture lookup returned unexpected payload: {keys}"
+                )
+            return None
+
         if match.get("status") != "FINISHED":
             return None
 
