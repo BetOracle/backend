@@ -13,6 +13,13 @@ schedule==1.2.0
 
 # PostgreSQL
 psycopg[binary]==3.2.13
+psycopg-pool==3.2.3
+
+# Discord bot
+discord.py==2.3.2
+
+# Numerical / statistical
+numpy==2.0.2
 
 # Production server
 gunicorn==22.0.0

@@ -1,4 +1,5 @@
 import time
+import logging
 import schedule
 from datetime import datetime, timedelta
 from data_fetcher import DataFetcher
@@ -9,6 +10,13 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 class FootyOracleAgent:
@@ -32,19 +40,31 @@ class FootyOracleAgent:
 
         self.mock_mode = os.getenv("MOCK_MODE", "True").lower() == "true"
 
-        # Backend API URL (for recording on-chain)
+        # Backend API URL (for resolving via REST when no local DB)
         self.backend_url = backend_url or os.getenv(
             "BACKEND_URL", "http://localhost:5000"
         )
 
-        # Agent configuration
-        self.prediction_window_hours = 24  # Predict matches within next 24 hours
-        self.check_interval_minutes = 60  # Check for new matches every hour
+        # Load Discord bot if configured
+        self._discord_bot = None
+        try:
+            from discord_bot import FootyOracleDiscordBot
+            discord_token = os.getenv("DISCORD_TOKEN", "")
+            if discord_token:
+                self._discord_bot = FootyOracleDiscordBot(self.backend_url)
+        except ImportError:
+            pass
 
-        print("🤖 FootyOracle Agent initialized")
-        print(f"   Backend: {self.backend_url}")
-        print(f"   Prediction window: {self.prediction_window_hours}h")
-        print(f"   Check interval: {self.check_interval_minutes}m")
+        # Agent configuration
+        self.prediction_window_hours = 24
+        self.check_interval_minutes = 60
+
+        logger.info(
+            "FootyOracle Agent initialized | backend=%s | window=%dh | interval=%dm",
+            self.backend_url,
+            self.prediction_window_hours,
+            self.check_interval_minutes,
+        )
 
     def run_prediction_cycle(self):
         """
@@ -54,14 +74,12 @@ class FootyOracleAgent:
         3. Record predictions
         """
 
-        print("\n" + "=" * 60)
-        print(
-            f"🤖 Agent Cycle Started - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        logger.info(
+            "=== Agent Prediction Cycle Started [%s] ===",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
-        print("=" * 60)
 
         try:
-            # Get upcoming matches for all leagues
             leagues = ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1"]
             total_predictions = 0
 
@@ -69,10 +87,10 @@ class FootyOracleAgent:
                 predictions_made = self._predict_league_matches(league)
                 total_predictions += predictions_made
 
-            print(f"\n✅ Cycle complete: {total_predictions} new predictions made")
+            logger.info("Cycle complete: %d new predictions made", total_predictions)
 
         except Exception as e:
-            print(f"❌ Error in prediction cycle: {e}")
+            logger.error("Error in prediction cycle: %s", e, exc_info=True)
 
     def _predict_league_matches(self, league: str) -> int:
         """
@@ -82,49 +100,53 @@ class FootyOracleAgent:
             Number of predictions made
         """
 
-        print(f"\n🔍 Checking {league} matches...")
+        logger.info("Checking %s matches...", league)
 
-        # Fetch upcoming matches
         matches = self.data_fetcher.get_league_matches(league)
 
         if not matches:
-            print("   No upcoming matches found")
+            logger.debug("No upcoming matches found for %s", league)
             return 0
 
         predictions_made = 0
 
         for match in matches:
-            # Check if match is within prediction window
             if not self._should_predict_match(match):
                 continue
 
-            # Check if we already predicted this match
             match_id = self._generate_match_id(match, league)
             if self._already_predicted(match_id):
                 continue
 
-            # Generate prediction
             try:
                 prediction = self._generate_prediction(match, league, match_id)
-
-                # Record prediction (local + backend)
-                self._record_prediction(prediction)
-
+                self._record_prediction(prediction, match)
                 predictions_made += 1
-
-                print(f"   ✅ {match['homeTeam']} vs {match['awayTeam']}")
-                print(
-                    f"      Prediction: {prediction['prediction']} ({prediction['confidence']:.1%})"
+                logger.info(
+                    "Predicted: %s vs %s → %s (conf=%.1f%%, edge=%.1f%%)",
+                    match["homeTeam"],
+                    match["awayTeam"],
+                    prediction["prediction"],
+                    prediction["confidence"] * 100,
+                    prediction.get("edge", 0) * 100,
                 )
 
             except RuntimeError as e:
-                print(
-                    f"   ⏭️  Skipped {match['homeTeam']} vs {match['awayTeam']}: {e}"
+                # No value bet — not an error, just no pick for this match
+                logger.debug(
+                    "No value bet for %s vs %s: %s",
+                    match.get("homeTeam"),
+                    match.get("awayTeam"),
+                    e,
                 )
 
             except Exception as e:
-                print(
-                    f"   ❌ Error predicting {match['homeTeam']} vs {match['awayTeam']}: {e}"
+                logger.error(
+                    "Error predicting %s vs %s: %s",
+                    match.get("homeTeam"),
+                    match.get("awayTeam"),
+                    e,
+                    exc_info=True,
                 )
 
         return predictions_made
@@ -160,21 +182,12 @@ class FootyOracleAgent:
                 return False
 
     def _already_predicted(self, match_id: str) -> bool:
-        """Check if we already have a prediction for this match"""
-
-        # Check local database
+        """
+        Check if we already have a prediction for this match.
+        Uses direct DB lookup (O(1)) instead of scanning the full predictions list.
+        """
         if self.db and self.db.get_prediction_by_match_id(match_id):
             return True
-
-        # Check backend (optional)
-        try:
-            response = requests.get(f"{self.backend_url}/api/predictions")
-            if response.status_code == 200:
-                predictions = response.json().get("predictions", [])
-                return any(p["matchId"] == match_id for p in predictions)
-        except Exception:
-            pass
-
         return False
 
     def _generate_match_id(self, match: dict, league: str) -> str:
@@ -202,12 +215,10 @@ class FootyOracleAgent:
 
         return prediction
 
-    def _record_prediction(self, prediction_data: dict):
-        """
-        Record prediction in local DB and send to backend
-        """
+    def _record_prediction(self, prediction_data: dict, match: dict = None):
+        """Record prediction in local DB and send to backend API."""
 
-        # Save locally (optional)
+        # Save locally
         if self.db:
             prediction = Prediction(
                 match_id=prediction_data["matchId"],
@@ -215,30 +226,56 @@ class FootyOracleAgent:
                 confidence=prediction_data["confidence"],
                 factors=prediction_data["factors"],
                 timestamp=prediction_data["timestamp"],
+                league=prediction_data.get("matchId", "-").split("-")[0] if prediction_data.get("matchId") else "",
             )
-
             self.db.add_prediction(prediction)
 
-        # Send to backend API (which will record on-chain)
-        try:
-            response = requests.post(
-                f"{self.backend_url}/api/predict",
-                json={
-                    "matchId": prediction_data["matchId"],
-                    "prediction": prediction_data["prediction"],
-                    "confidence": prediction_data["confidence"],
-                    "factors": prediction_data["factors"],
-                    "timestamp": prediction_data["timestamp"],
-                },
-            )
+        # Send to backend API
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(
+                    f"{self.backend_url}/api/predict",
+                    json={
+                        "matchId": prediction_data["matchId"],
+                        "prediction": prediction_data["prediction"],
+                        "confidence": prediction_data["confidence"],
+                        "factors": prediction_data["factors"],
+                        "timestamp": prediction_data["timestamp"],
+                    },
+                    timeout=10,
+                )
 
-            if response.status_code == 201:
-                print("      📝 Recorded on-chain")
-            else:
-                print(f"      ⚠️  Backend recording failed: {response.status_code}")
+                if response.status_code in (200, 201):
+                    logger.info("Prediction recorded via backend API")
+                    break
+                else:
+                    logger.warning(
+                        "Backend recording failed (attempt %d/%d): HTTP %d",
+                        attempt, max_retries, response.status_code,
+                    )
 
-        except Exception as e:
-            print(f"      ⚠️  Backend unreachable: {e}")
+            except requests.exceptions.RequestException as e:
+                logger.warning(
+                    "Backend unreachable (attempt %d/%d): %s",
+                    attempt, max_retries, e,
+                )
+
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)  # Exponential backoff
+
+        # Send Discord alert if bot is configured
+        if self._discord_bot and match:
+            try:
+                self._discord_bot.send_prediction_alert_sync(
+                    match=match,
+                    prediction=prediction_data["prediction"],
+                    confidence=prediction_data["confidence"],
+                    edge=prediction_data.get("edge", 0),
+                    factors=prediction_data.get("factors", {}),
+                )
+            except Exception as e:
+                logger.warning("Discord alert failed: %s", e)
 
     def _auto_resolve_via_backend(self) -> None:
         max_loops = 30
@@ -259,12 +296,13 @@ class FootyOracleAgent:
                     timeout=30,
                 )
             except Exception as e:
-                print(f"❌ Error in resolution cycle: {e}")
+                logger.error("Error in resolution cycle: %s", e)
                 return
 
             if response.status_code != 200:
-                print(
-                    f"❌ Backend auto-resolve failed: {response.status_code} {response.text}"
+                logger.error(
+                    "Backend auto-resolve failed: HTTP %d",
+                    response.status_code,
                 )
                 return
 
@@ -274,20 +312,20 @@ class FootyOracleAgent:
             processed = int(payload.get("processed", 0))
             total_resolved += batch_resolved
 
-            print(
-                f"   Auto-resolve batch: processed={processed}, resolved={batch_resolved}, remaining={remaining}"
+            logger.info(
+                "Auto-resolve batch: processed=%d, resolved=%d, remaining=%d",
+                processed, batch_resolved, remaining,
             )
 
             if remaining <= 0:
                 break
-
             if processed <= 0:
-                print("   Auto-resolve made no progress; stopping")
+                logger.info("Auto-resolve made no progress; stopping")
                 break
 
             time.sleep(1)
 
-        print(f"\n✅ Auto-resolve completed: resolved={total_resolved}")
+        logger.info("Auto-resolve completed: total resolved=%d", total_resolved)
 
     def run_resolution_cycle(self):
         """
@@ -297,11 +335,10 @@ class FootyOracleAgent:
         3. Update records
         """
 
-        print("\n" + "=" * 60)
-        print(
-            f"🔍 Resolution Cycle Started - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        logger.info(
+            "=== Resolution Cycle Started [%s] ===",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
-        print("=" * 60)
 
         try:
             if not self.db:
@@ -311,25 +348,22 @@ class FootyOracleAgent:
             unresolved = self.db.get_unresolved_predictions()
 
             if not unresolved:
-                print("   No pending predictions to resolve")
+                logger.info("No pending predictions to resolve")
                 return
 
-            print(f"   Found {len(unresolved)} pending predictions")
+            logger.info("Found %d pending predictions", len(unresolved))
 
             resolved_count = 0
 
             for prediction in unresolved:
-                # Fetch actual result
                 actual_outcome = self.data_fetcher.get_match_result(prediction.match_id)
 
                 if actual_outcome:
-                    # Resolve locally
                     is_correct = prediction.predicted_outcome == actual_outcome
                     self.db.resolve_prediction(
                         prediction.prediction_id, actual_outcome, is_correct
                     )
 
-                    # Resolve on backend
                     try:
                         requests.post(
                             f"{self.backend_url}/api/resolve",
@@ -337,65 +371,47 @@ class FootyOracleAgent:
                                 "matchId": prediction.match_id,
                                 "actualOutcome": actual_outcome,
                             },
+                            timeout=10,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Backend resolve notify failed: %s", e)
 
-                    status = "✅ CORRECT" if is_correct else "❌ INCORRECT"
-                    print(f"   {status} - {prediction.match_id}")
-
+                    logger.info(
+                        "%s — %s (predicted=%s, actual=%s)",
+                        "CORRECT" if is_correct else "INCORRECT",
+                        prediction.match_id,
+                        prediction.predicted_outcome,
+                        actual_outcome,
+                    )
                     resolved_count += 1
 
-            print(f"\n✅ Resolved {resolved_count} predictions")
-
-            # Print accuracy stats
+            logger.info("Resolved %d predictions", resolved_count)
             stats = self.db.get_statistics()
-            print(f"   Current accuracy: {stats['accuracy']:.1f}%")
+            logger.info("Current accuracy: %.1f%%", stats["accuracy"])
 
         except Exception as e:
-            print(f"❌ Error in resolution cycle: {e}")
+            logger.error("Error in resolution cycle: %s", e, exc_info=True)
 
     def run_scheduled(self):
-        """
-        Run agent on a schedule:
-        - Prediction cycle every hour
-        - Resolution cycle every 6 hours
-        """
+        """Run agent on a schedule (prediction every hour, resolution every 6h)."""
+        logger.info("Starting FootyOracle Agent in scheduled mode. Press Ctrl+C to stop.")
 
-        print("\n🤖 Starting FootyOracle Agent in scheduled mode...")
-        print("   Press Ctrl+C to stop")
-        print()
-
-        # Schedule prediction cycle
-        schedule.every(self.check_interval_minutes).minutes.do(
-            self.run_prediction_cycle
-        )
-
-        # Schedule resolution cycle (every 6 hours)
+        schedule.every(self.check_interval_minutes).minutes.do(self.run_prediction_cycle)
         schedule.every(6).hours.do(self.run_resolution_cycle)
 
         # Run immediately on start
         self.run_prediction_cycle()
 
-        # Keep running
         while True:
             schedule.run_pending()
-            time.sleep(60)  # Check every minute
+            time.sleep(60)
 
     def run_once(self):
-        """
-        Run agent once (for testing or cron jobs)
-        """
-
-        print("\n🤖 Running FootyOracle Agent (single cycle)...")
-
-        # Run prediction cycle
+        """Run agent once (for testing or cron jobs)."""
+        logger.info("Running FootyOracle Agent (single cycle)")
         self.run_prediction_cycle()
-
-        # Run resolution cycle
         self.run_resolution_cycle()
-
-        print("\n✅ Agent cycle complete")
+        logger.info("Agent cycle complete")
 
 
 # ============================================================================

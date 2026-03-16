@@ -1,3 +1,4 @@
+import logging
 import requests
 import os
 from typing import List, Dict, Optional
@@ -11,8 +12,20 @@ from mock_data import MockDataProvider
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 _MISSING_FOOTBALL_API_KEY = "Missing FOOTBALL_API_KEY"
 _MISSING_RAPIDAPI_KEY = "Missing RAPIDAPI_KEY"
+_MISSING_ODDS_API_KEY = "Missing ODDS_API_KEY"
+
+# League code mapping for the-odds-api.com sport keys
+_ODDS_API_SPORT_KEYS = {
+    "EPL": "soccer_epl",
+    "LaLiga": "soccer_spain_la_liga",
+    "SerieA": "soccer_italy_serie_a",
+    "Bundesliga": "soccer_germany_bundesliga",
+    "Ligue1": "soccer_france_ligue_one",
+}
 
 
 class DataFetcher:
@@ -43,6 +56,13 @@ class DataFetcher:
             "RAPIDAPI_URL", "https://v3.football.api-sports.io"
         )
 
+        # Market odds API (the-odds-api.com)
+        self.odds_api_key = os.getenv("ODDS_API_KEY", "")
+        self.odds_api_url = "https://api.the-odds-api.com/v4"
+
+        # Agent ID (read-only — set by Nnenna after contract deployment)
+        self.agent_id = os.getenv("AGENT_ID", "")
+
         self.rapidapi_season = int(
             os.getenv("RAPIDAPI_SEASON", str(datetime.now().year))
         )
@@ -63,6 +83,7 @@ class DataFetcher:
             60.0 / self.requests_per_minute if self.requests_per_minute > 0 else 0.0
         )
         self._last_request_time = 0.0
+        self._last_response: Optional[requests.Response] = None
 
         # Mock data provider
         self.mock = MockDataProvider()
@@ -90,15 +111,15 @@ class DataFetcher:
         self.cache_duration = 300  # 5 minutes
 
         if self.mock_mode:
-            print("⚠️  DataFetcher: MOCK MODE enabled")
+            logger.info("DataFetcher: MOCK MODE enabled")
         else:
-            print("✅ DataFetcher: Real API mode")
+            logger.info("DataFetcher: Real API mode")
             if self.football_api_key:
-                print("   ✅ football-data.org connected")
+                logger.info("  football-data.org connected")
             if self.rapidapi_key:
-                print("   ✅ RapidAPI connected")
+                logger.info("  RapidAPI connected")
             if self.strict_real_data:
-                print("   ✅ Strict real-data mode (no mock fallback)")
+                logger.info("  Strict real-data mode (no mock fallback)")
 
     def _strict_fail(self, reason: str):
         if self.strict_real_data and not self.mock_mode:
@@ -161,8 +182,9 @@ class DataFetcher:
         return self.strict_real_data and not self.mock_mode
 
     def _handle_rate_limit(self, url: str, headers: Dict, cache_key: Optional[str]) -> Optional[Dict]:
-        print("⚠️  Rate limit exceeded")
-        time.sleep(max(0.0, self._backoff_seconds_from_response(self._last_response)))
+        logger.warning("Rate limit exceeded — retrying after backoff")
+        backoff = self._backoff_seconds_from_response(self._last_response) if self._last_response else 6.0
+        time.sleep(max(0.0, backoff))
 
         retry_response = self._request_once(url, headers)
         if retry_response.status_code == 200:
@@ -182,7 +204,7 @@ class DataFetcher:
                 raise RuntimeError(
                     f"API auth error ({response.status_code}). Response: {response.text}"
                 )
-            print(f"⚠️  API auth error {response.status_code}: {response.text}")
+            logger.warning("API auth error %d: %s", response.status_code, response.text[:200])
             return None
 
         if response.status_code == 404:
@@ -193,7 +215,7 @@ class DataFetcher:
                 f"API error ({response.status_code}). Response: {response.text}"
             )
 
-        print(f"⚠️  API error {response.status_code}: {response.text}")
+        logger.warning("API error %d: %s", response.status_code, response.text[:200])
         return None
 
     def _make_request(
@@ -228,7 +250,7 @@ class DataFetcher:
             return self._handle_non_200(response)
 
         except Exception as e:
-            print(f"❌ Request failed: {e}")
+            logger.error("Request failed: %s", e)
             return None
 
     def _outcome_from_match_score(
@@ -751,3 +773,118 @@ class DataFetcher:
                 print(f"Error fetching matches: {e}")
             self._strict_fail(f"Error fetching matches: {e}")
             return self.mock.get_league_matches(league, days_ahead)
+
+    # =========================================================================
+    # MARKET ODDS
+    # =========================================================================
+
+    def _extract_odds_from_event(self, best_event: Dict, event_home: str) -> Optional[Tuple[List[float], List[float], List[float]]]:
+        """Extract home, draw, and away odds from bookmaker data."""
+        home_prices, draw_prices, away_prices = [], [], []
+
+        for bookmaker in best_event.get("bookmakers", []):
+            for market in bookmaker.get("markets", []):
+                if market.get("key") != "h2h":
+                    continue
+                self._collect_prices_from_market(market, event_home, home_prices, draw_prices, away_prices)
+
+        if not home_prices:
+            return None
+        return home_prices, draw_prices, away_prices
+
+    def _collect_prices_from_market(
+        self,
+        market: Dict,
+        event_home: str,
+        home_prices: List[float],
+        draw_prices: List[float],
+        away_prices: List[float]
+    ) -> None:
+        """Collect prices from a single market's outcomes."""
+        for outcome in market.get("outcomes", []):
+            name = outcome.get("name", "")
+            price = float(outcome.get("price", 0))
+            if price <= 1.0:
+                continue
+            if name == event_home:
+                home_prices.append(price)
+            elif name == "Draw":
+                draw_prices.append(price)
+            else:
+                away_prices.append(price)
+
+    def _find_best_matching_event(self, events: List[Dict], home_norm: str, away_norm: str) -> Optional[Dict]:
+        """Find the event that best matches the given team names."""
+        best_event = None
+        best_score = -1
+
+        for event in events:
+            event_home_norm = self._normalize_team_name(event.get("home_team", ""))
+            event_away_norm = self._normalize_team_name(event.get("away_team", ""))
+            score = (
+                self._string_token_score(home_norm, event_home_norm)
+                + self._string_token_score(away_norm, event_away_norm)
+            )
+            if score > best_score:
+                best_score = score
+                best_event = event
+
+        return best_event if best_event and best_score > 0 else None
+
+    def get_market_odds(self, home_team: str, away_team: str, league: str) -> Optional[Dict]:
+        """
+        Fetch current market odds for a match from the-odds-api.com.
+
+        Source: the-odds-api.com
+        Fallback: calibrated mock odds based on team ratings
+
+        Returns:
+            {
+                "home": 2.50,   # decimal odds — home win
+                "draw": 3.20,   # decimal odds — draw
+                "away": 2.80    # decimal odds — away win
+            }
+            or None if odds cannot be retrieved
+        """
+        if self.mock_mode or not self.odds_api_key:
+            return self.mock.get_market_odds(home_team, away_team, league)
+
+        try:
+            sport_key = _ODDS_API_SPORT_KEYS.get(league, "soccer_epl")
+            url = f"{self.odds_api_url}/sports/{sport_key}/odds/"
+            params = {
+                "apiKey": self.odds_api_key,
+                "regions": "uk",
+                "markets": "h2h",
+                "oddsFormat": "decimal",
+            }
+
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code != 200:
+                print(f"⚠️  Odds API error {response.status_code}: {response.text}")
+                return self.mock.get_market_odds(home_team, away_team, league)
+
+            events = response.json()
+            home_norm = self._normalize_team_name(home_team)
+            away_norm = self._normalize_team_name(away_team)
+
+            best_event = self._find_best_matching_event(events, home_norm, away_norm)
+            if not best_event:
+                return self.mock.get_market_odds(home_team, away_team, league)
+
+            # Average odds across all bookmakers for robustness
+            event_home = best_event.get("home_team", "")
+            odds_result = self._extract_odds_from_event(best_event, event_home)
+            if not odds_result:
+                return self.mock.get_market_odds(home_team, away_team, league)
+
+            home_prices, draw_prices, away_prices = odds_result
+            return {
+                "home": round(sum(home_prices) / len(home_prices), 3),
+                "draw": round(sum(draw_prices) / len(draw_prices), 3) if draw_prices else 3.40,
+                "away": round(sum(away_prices) / len(away_prices), 3) if away_prices else 3.40,
+            }
+
+        except Exception as e:
+            print(f"❌ Error fetching market odds: {e}")
+            return self.mock.get_market_odds(home_team, away_team, league)

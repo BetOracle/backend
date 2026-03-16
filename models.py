@@ -2,19 +2,32 @@ from datetime import datetime
 from typing import List, Optional, Dict
 import json
 import os
+import uuid
 import threading
 import psycopg
+from psycopg.rows import dict_row
 
 class Prediction:
     """Prediction model for football matches."""
 
-    def __init__(self, match_id: str, predicted_outcome: str, confidence: float, factors: dict, timestamp: int, prediction_id: str = None):
+    def __init__(
+        self,
+        match_id: str,
+        predicted_outcome: str,
+        confidence: float,
+        factors: dict,
+        timestamp: int,
+        prediction_id: str = None,
+        league: str = None,
+    ):
         self.prediction_id = prediction_id or self.generate_prediction_id()
         self.match_id = match_id
         self.predicted_outcome = predicted_outcome
         self.confidence = confidence
         self.factors = factors
         self.timestamp = timestamp
+        # Derive league from match_id prefix if not supplied (e.g. "EPL-ARS-CHE-...")
+        self.league = league or (match_id.split("-")[0] if match_id else "")
 
         # Resolution fields
         self.resolved = False
@@ -27,6 +40,7 @@ class Prediction:
         return {
             "predictionId": self.prediction_id,
             "matchId": self.match_id,
+            "league": self.league,
             "prediction": self.predicted_outcome,
             "confidence": self.confidence,
             "factors": self.factors,
@@ -42,17 +56,18 @@ class Prediction:
 
     @staticmethod
     def generate_prediction_id() -> str:
-        """Generate a unique prediction ID."""
-        return f"offchain-{int(datetime.now().timestamp())}"
+        """Generate a collision-safe unique prediction ID using uuid4."""
+        return f"offchain-{uuid.uuid4().hex[:16]}"
 
     def to_json(self) -> str:
-        """Serialize the predictions to JSON."""
+        """Serialize the prediction to JSON."""
         return json.dumps(self.to_dict(), indent=4)
 
 class PredictionDatabase:
     """
-    In-memory database for storing predictions.
-    Can be replaced with SQLite or PostgreSQL later
+    PostgreSQL-backed prediction store with connection pooling.
+    Uses psycopg_pool.ConnectionPool so it works safely under gunicorn
+    with multiple worker processes.
     """
 
     def __init__(self):
@@ -62,22 +77,49 @@ class PredictionDatabase:
                 "DATABASE_URL is required (PostgreSQL). Set DATABASE_URL in your environment."
             )
 
-        import psycopg
-        from psycopg.rows import dict_row
-
-        self._conn = psycopg.connect(self.database_url, row_factory=dict_row)
+        try:
+            from psycopg_pool import ConnectionPool
+            self._pool = ConnectionPool(
+                conninfo=self.database_url,
+                min_size=1,
+                max_size=10,
+                kwargs={"row_factory": dict_row},
+            )
+        except ImportError:
+            # Fallback: single connection (dev/test without psycopg-pool installed)
+            import logging
+            logging.getLogger(__name__).warning(
+                "psycopg-pool not installed — falling back to single connection. "
+                "Install psycopg-pool for production use."
+            )
+            self._pool = None
+            self._conn = psycopg.connect(self.database_url, row_factory=dict_row)
 
         self._lock = threading.Lock()
         self._init_schema()
 
+    def _connection(self):
+        """Context manager that yields a psycopg connection from the pool (or fallback)."""
+        if self._pool is not None:
+            return self._pool.connection()
+        # Fallback: wrap the single connection in a trivial context manager
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _single():
+            yield self._conn
+
+        return _single()
+
     def _init_schema(self):
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._lock, self._connection() as conn:
+            cur = conn.cursor()
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS predictions (
                     prediction_id TEXT PRIMARY KEY,
                     match_id TEXT NOT NULL,
+                    league TEXT NOT NULL DEFAULT '',
                     predicted_outcome TEXT NOT NULL,
                     confidence DOUBLE PRECISION NOT NULL,
                     factors_json JSONB NOT NULL,
@@ -87,6 +129,20 @@ class PredictionDatabase:
                     correct BOOLEAN,
                     resolution_timestamp BIGINT
                 )
+                """
+            )
+            # Add league column to existing tables that predate this schema
+            cur.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='predictions' AND column_name='league'
+                    ) THEN
+                        ALTER TABLE predictions ADD COLUMN league TEXT NOT NULL DEFAULT '';
+                    END IF;
+                END$$;
                 """
             )
             try:
@@ -101,8 +157,10 @@ class PredictionDatabase:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_predictions_resolved ON predictions(resolved)"
             )
-
-            self._conn.commit()
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_predictions_league ON predictions(league)"
+            )
+            conn.commit()
 
     def _row_to_prediction(self, row) -> Prediction:
         pred = Prediction(
@@ -112,6 +170,7 @@ class PredictionDatabase:
             factors=row["factors_json"],
             timestamp=row["timestamp"],
             prediction_id=row["prediction_id"],
+            league=row.get("league", ""),
         )
         pred.resolved = bool(row["resolved"])
         pred.actual_outcome = row["actual_outcome"]
@@ -120,51 +179,34 @@ class PredictionDatabase:
         return pred
 
     def add_prediction(self, prediction: Prediction) -> str:
-        """
-        Add new prediction to database
-
-        Args:
-            prediction: Prediction object
-
-        Returns:
-            prediction_id
-        """
-
+        """Add new prediction to database. Returns prediction_id."""
         if not prediction.prediction_id:
             prediction.prediction_id = prediction.generate_prediction_id()
 
-        with self._lock:
-            cur = self._conn.cursor()
-            if prediction.correct is None:
-                correct_value = None
-            else:
-                correct_value = bool(prediction.correct)
+        correct_value = None if prediction.correct is None else bool(prediction.correct)
 
+        with self._lock, self._connection() as conn:
+            cur = conn.cursor()
             cur.execute(
                 """
                 INSERT INTO predictions (
-                    prediction_id,
-                    match_id,
-                    predicted_outcome,
-                    confidence,
-                    factors_json,
-                    timestamp,
-                    resolved,
-                    actual_outcome,
-                    correct,
+                    prediction_id, match_id, league, predicted_outcome, confidence,
+                    factors_json, timestamp, resolved, actual_outcome, correct,
                     resolution_timestamp
-                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
                 ON CONFLICT (match_id) DO UPDATE SET
                     predicted_outcome = EXCLUDED.predicted_outcome,
-                    confidence = EXCLUDED.confidence,
-                    factors_json = EXCLUDED.factors_json,
-                    timestamp = EXCLUDED.timestamp
+                    confidence        = EXCLUDED.confidence,
+                    factors_json      = EXCLUDED.factors_json,
+                    timestamp         = EXCLUDED.timestamp,
+                    league            = EXCLUDED.league
                 WHERE predictions.resolved = FALSE
                 RETURNING prediction_id
                 """,
                 (
                     prediction.prediction_id,
                     prediction.match_id,
+                    prediction.league or "",
                     prediction.predicted_outcome,
                     float(prediction.confidence),
                     json.dumps(prediction.factors),
@@ -175,7 +217,6 @@ class PredictionDatabase:
                     prediction.resolution_timestamp,
                 ),
             )
-
             row = cur.fetchone()
             if row is None:
                 cur.execute(
@@ -183,8 +224,7 @@ class PredictionDatabase:
                     (prediction.match_id,),
                 )
                 row = cur.fetchone()
-
-            self._conn.commit()
+            conn.commit()
 
         return row["prediction_id"]
 
@@ -194,44 +234,68 @@ class PredictionDatabase:
 
     def get_prediction(self, prediction_id: str) -> Optional[Prediction]:
         """Get prediction by its ID."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM predictions WHERE prediction_id = %s", (prediction_id,)
-        )
-        row = cur.fetchone()
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM predictions WHERE prediction_id = %s", (prediction_id,))
+            row = cur.fetchone()
         return self._row_to_prediction(row) if row else None
 
     def get_prediction_by_match_id(self, match_id: str) -> Optional[Prediction]:
         """Get prediction by match ID."""
-        cur = self._conn.cursor()
-        cur.execute("SELECT * FROM predictions WHERE match_id = %s", (match_id,))
-        row = cur.fetchone()
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM predictions WHERE match_id = %s", (match_id,))
+            row = cur.fetchone()
         return self._row_to_prediction(row) if row else None
 
-    def get_all_predictions(self) -> List[Prediction]:
-        """Get all predictions in the database."""
-        cur = self._conn.cursor()
-        cur.execute("SELECT * FROM predictions ORDER BY timestamp DESC")
-        rows = cur.fetchall()
+    def get_all_predictions(
+        self, page: int = 1, limit: int = 50
+    ) -> List[Prediction]:
+        """Get predictions paginated (page is 1-indexed)."""
+        offset = (max(1, page) - 1) * limit
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM predictions ORDER BY timestamp DESC LIMIT %s OFFSET %s",
+                (limit, offset),
+            )
+            rows = cur.fetchall()
         return [self._row_to_prediction(r) for r in rows]
+
+    def count_predictions(self) -> int:
+        """Total number of predictions."""
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS c FROM predictions")
+            return int(cur.fetchone()["c"])
 
     def get_unresolved_predictions(self) -> List[Prediction]:
         """Get all unresolved predictions."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM predictions WHERE resolved = FALSE ORDER BY timestamp DESC"
-        )
-        rows = cur.fetchall()
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM predictions WHERE resolved = FALSE ORDER BY timestamp DESC"
+            )
+            rows = cur.fetchall()
         return [self._row_to_prediction(r) for r in rows]
 
-    def get_predictions_by_league(self, league: str) -> List[Prediction]:
-        """Get predictions for a specific league."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT * FROM predictions WHERE match_id LIKE %s ORDER BY timestamp DESC",
-            (f"{league}%",),
-        )
-        rows = cur.fetchall()
+    def get_predictions_by_league(
+        self, league: str, page: int = 1, limit: int = 50
+    ) -> List[Prediction]:
+        """Get predictions for a specific league (exact league column match)."""
+        offset = (max(1, page) - 1) * limit
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM predictions
+                WHERE league = %s
+                ORDER BY timestamp DESC
+                LIMIT %s OFFSET %s
+                """,
+                (league, limit, offset),
+            )
+            rows = cur.fetchall()
         return [self._row_to_prediction(r) for r in rows]
 
     # =========================================================================
@@ -241,22 +305,10 @@ class PredictionDatabase:
     def resolve_prediction(
         self, prediction_id: str, actual_outcome: str, correct: bool
     ) -> bool:
-        """
-        Resolve a prediction with actual result
-
-        Args:
-            prediction_id: ID of prediction to resolve
-            actual_outcome: Actual match outcome
-            correct: Whether prediction was correct
-
-        Returns:
-            True if successful, False if not found
-        """
-
+        """Resolve a prediction with actual result. Returns True if updated."""
         resolution_timestamp = int(datetime.now().timestamp())
-
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._lock, self._connection() as conn:
+            cur = conn.cursor()
             cur.execute(
                 """
                 UPDATE predictions
@@ -266,15 +318,9 @@ class PredictionDatabase:
                     resolution_timestamp = %s
                 WHERE prediction_id = %s
                 """,
-                (
-                    actual_outcome,
-                    bool(correct),
-                    resolution_timestamp,
-                    prediction_id,
-                ),
+                (actual_outcome, bool(correct), resolution_timestamp, prediction_id),
             )
-            self._conn.commit()
-
+            conn.commit()
         return cur.rowcount > 0
 
     # =========================================================================
@@ -283,94 +329,69 @@ class PredictionDatabase:
 
     def delete_prediction(self, prediction_id: str) -> bool:
         """Delete a prediction by its ID."""
-        with self._lock:
-            cur = self._conn.cursor()
+        with self._lock, self._connection() as conn:
+            cur = conn.cursor()
             cur.execute(
-                "DELETE FROM predictions WHERE prediction_id = %s",
-                (prediction_id,),
+                "DELETE FROM predictions WHERE prediction_id = %s", (prediction_id,)
             )
-            self._conn.commit()
+            conn.commit()
         return cur.rowcount > 0
 
     def clear_all(self):
-        """
-        Clear all predictions (use with caution!)
-        """
-        with self._lock:
-            cur = self._conn.cursor()
+        """Clear all predictions (use with caution!)."""
+        with self._lock, self._connection() as conn:
+            cur = conn.cursor()
             cur.execute("DELETE FROM predictions")
-            self._conn.commit()
+            conn.commit()
 
     # =========================================================================
     # STATISTICS
     # =========================================================================
 
     def get_statistics(self) -> dict:
-        """
-        Get overall statistics
+        """Get overall statistics."""
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) AS c FROM predictions")
+            total = int(cur.fetchone()["c"])
+            cur.execute("SELECT COUNT(*) AS c FROM predictions WHERE resolved = TRUE")
+            resolved = int(cur.fetchone()["c"])
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM predictions WHERE resolved = TRUE AND correct = TRUE"
+            )
+            correct = int(cur.fetchone()["c"])
 
-        Returns:
-            {
-                "totalPredictions": 100,
-                "resolved": 80,
-                "pending": 20,
-                "correct": 54,
-                "incorrect": 26,
-                "accuracy": 67.5
-            }
-        """
-
-        cur = self._conn.cursor()
-        cur.execute("SELECT COUNT(*) AS c FROM predictions")
-        total = int(cur.fetchone()["c"])
-
-        cur.execute("SELECT COUNT(*) AS c FROM predictions WHERE resolved = TRUE")
-        resolved = int(cur.fetchone()["c"])
-        pending = total - resolved
-
-        cur.execute(
-            "SELECT COUNT(*) AS c FROM predictions WHERE resolved = TRUE AND correct = TRUE"
-        )
-        correct = int(cur.fetchone()["c"])
         incorrect = resolved - correct
-
         accuracy = (correct / resolved * 100) if resolved > 0 else 0.0
-
         return {
             "totalPredictions": total,
             "resolved": resolved,
-            "pending": pending,
+            "pending": total - resolved,
             "correct": correct,
             "incorrect": incorrect,
             "accuracy": round(accuracy, 1),
         }
 
     def get_league_statistics(self, league: str) -> dict:
-        """Get statistics for specific league"""
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) AS c FROM predictions WHERE match_id LIKE %s",
-            (f"{league}%",),
-        )
-        total = int(cur.fetchone()["c"])
+        """Get statistics for specific league."""
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM predictions WHERE league = %s", (league,)
+            )
+            total = int(cur.fetchone()["c"])
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM predictions WHERE league = %s AND resolved = TRUE",
+                (league,),
+            )
+            resolved = int(cur.fetchone()["c"])
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM predictions WHERE league = %s AND resolved = TRUE AND correct = TRUE",
+                (league,),
+            )
+            correct = int(cur.fetchone()["c"])
 
-        cur.execute(
-            "SELECT COUNT(*) AS c FROM predictions WHERE match_id LIKE %s AND resolved = TRUE",
-            (f"{league}%",),
-        )
-        resolved = int(cur.fetchone()["c"])
-
-        cur.execute(
-            """
-            SELECT COUNT(*) AS c
-            FROM predictions
-            WHERE match_id LIKE %s AND resolved = TRUE AND correct = TRUE
-            """,
-            (f"{league}%",),
-        )
-        correct = int(cur.fetchone()["c"])
         accuracy = (correct / resolved * 100) if resolved > 0 else 0.0
-
         return {
             "league": league,
             "totalPredictions": total,

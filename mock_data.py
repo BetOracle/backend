@@ -1,12 +1,14 @@
 import random
+import hashlib
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 
 
 class MockDataProvider:
     """
-    Provides extensive realistic mock data for testing
-    Includes full league rosters, player names, historical data
+    Provides extensive realistic mock data for testing.
+    All randomness is seeded per team-name/match so results are reproducible
+    across runs — same inputs always return the same mock outputs.
     """
 
     def __init__(self):
@@ -201,9 +203,16 @@ class MockDataProvider:
             "Carvalho",
         ]
 
+    def _rng(self, *seeds) -> random.Random:
+        """Create a deterministic RNG seeded from the given string tokens."""
+        combined = "|".join(str(s) for s in seeds)
+        seed = int(hashlib.md5(combined.encode()).hexdigest(), 16) % (2 ** 32)
+        return random.Random(seed)
+
     def _generate_all_team_ratings(self) -> Dict:
         """Generate ratings for all teams in all leagues"""
-        ratings = {}
+        # Use a fixed RNG so ratings are stable across restarts
+        rng = self._rng("ratings", "v1")
 
         # Top teams (manually set)
         top_teams = {
@@ -225,24 +234,20 @@ class MockDataProvider:
             "Atletico Madrid": {"overall": 85, "attack": 82, "defense": 88, "form": 84},
         }
 
+        ratings: Dict = {}
         ratings.update(top_teams)
 
-        # Generate ratings for all other teams
+        # Generate ratings for all other teams (seeded so stable across restarts)
         for league, teams in self.league_teams.items():
             for i, team in enumerate(teams):
                 if team not in ratings:
-                    # Position-based rating (higher position = lower rating)
-                    base_rating = 85 - (i * 2)
-                    base_rating = max(65, min(85, base_rating))
-
-                    variation = random.randint(-3, 3)
-                    overall = base_rating + variation
-
+                    base_rating = max(65, min(85, 85 - (i * 2)))
+                    overall = base_rating + rng.randint(-3, 3)
                     ratings[team] = {
                         "overall": overall,
-                        "attack": overall + random.randint(-5, 5),
-                        "defense": overall + random.randint(-5, 5),
-                        "form": overall + random.randint(-10, 10),
+                        "attack": overall + rng.randint(-5, 5),
+                        "defense": overall + rng.randint(-5, 5),
+                        "form": overall + rng.randint(-10, 10),
                     }
 
         return ratings
@@ -253,8 +258,9 @@ class MockDataProvider:
             return self.team_ratings[team_name].get(component, 70)
         return random.randint(65, 75)
 
-    def get_team_form(self, team_name: str, last_n: int = 5) -> List[str]:
-        """Generate realistic team form"""
+    def get_team_form(self, team_name: str, league: str = "", last_n: int = 5) -> List[str]:
+        """Generate deterministic team form based on team name seed."""
+        rng = self._rng("form", team_name, last_n)
         overall_rating = self.get_team_rating(team_name, "overall")
         form_rating = self.get_team_rating(team_name, "form")
 
@@ -264,7 +270,7 @@ class MockDataProvider:
 
         form = []
         for _ in range(last_n):
-            rand = random.random()
+            rand = rng.random()
             if rand < win_prob:
                 form.append("W")
             elif rand < win_prob + draw_prob:
@@ -274,26 +280,24 @@ class MockDataProvider:
 
         return form
 
-    def get_injuries(self, team_name: str) -> List[Dict]:
-        """Generate realistic injuries with player names"""
+    def get_injuries(self, team_name: str, league: str = "") -> List[Dict]:
+        """Generate deterministic realistic injuries seeded by team name."""
+        rng = self._rng("injuries", team_name)
         rating = self.get_team_rating(team_name, "overall")
 
-        max_injuries = 3 if rating >= 85 else 4 if rating >= 75 else 5
-        num_injuries = random.randint(0, max_injuries)
+        if rating >= 85:
+            max_injuries = 3
+        elif rating >= 75:
+            max_injuries = 4
+        else:
+            max_injuries = 5
+        num_injuries = rng.randint(0, max_injuries)
 
         positions = ["Goalkeeper", "Defender", "Midfielder", "Forward"]
         severities = ["minor", "moderate", "severe"]
         injury_types = [
-            "Hamstring",
-            "Ankle",
-            "Knee",
-            "Groin",
-            "Calf",
-            "Thigh",
-            "Back",
-            "Shoulder",
-            "Foot",
-            "Hip",
+            "Hamstring", "Ankle", "Knee", "Groin", "Calf",
+            "Thigh", "Back", "Shoulder", "Foot", "Hip",
         ]
 
         injuries = []
@@ -301,24 +305,24 @@ class MockDataProvider:
 
         for _ in range(num_injuries):
             while True:
-                name = f"{random.choice(self.first_names)} {random.choice(self.last_names)}"
+                name = f"{rng.choice(self.first_names)} {rng.choice(self.last_names)}"
                 if name not in used_names:
                     used_names.add(name)
                     break
 
-            severity = random.choice(severities)
+            severity = rng.choice(severities)
             days_out = {
-                "minor": random.randint(3, 10),
-                "moderate": random.randint(14, 28),
-                "severe": random.randint(60, 120),
+                "minor": rng.randint(3, 10),
+                "moderate": rng.randint(14, 28),
+                "severe": rng.randint(60, 120),
             }[severity]
 
             injuries.append(
                 {
                     "player": name,
-                    "position": random.choice(positions),
+                    "position": rng.choice(positions),
                     "severity": severity,
-                    "injury": f"{random.choice(injury_types)} injury",
+                    "injury": f"{rng.choice(injury_types)} injury",
                     "expectedReturn": (
                         datetime.now() + timedelta(days=days_out)
                     ).strftime("%Y-%m-%d"),
@@ -328,8 +332,9 @@ class MockDataProvider:
 
         return injuries
 
-    def get_h2h(self, home_team: str, away_team: str, last_n: int = 10) -> List[str]:
-        """Generate H2H based on ratings"""
+    def get_h2h(self, home_team: str, away_team: str, league: str = "", last_n: int = 10) -> List[str]:
+        """Generate deterministic H2H based on ratings and team-pair seed."""
+        rng = self._rng("h2h", home_team, away_team, last_n)
         home_rating = self.get_team_rating(home_team, "overall")
         away_rating = self.get_team_rating(away_team, "overall")
 
@@ -340,7 +345,7 @@ class MockDataProvider:
 
         results = []
         for _ in range(last_n):
-            rand = random.random()
+            rand = rng.random()
             if rand < home_win_prob:
                 results.append("HOME")
             elif rand < home_win_prob + draw_prob:
@@ -351,30 +356,63 @@ class MockDataProvider:
         return results
 
     def get_table_position(self, team_name: str, league: str) -> int:
-        """Get table position based on rating"""
+        """Get deterministic table position based on rating and team seed."""
+        rng = self._rng("position", team_name, league)
         rating = self.get_team_rating(team_name, "overall")
 
         if rating >= 90:
-            return random.randint(1, 2)
+            return rng.randint(1, 2)
         elif rating >= 85:
-            return random.randint(2, 5)
+            return rng.randint(2, 5)
         elif rating >= 80:
-            return random.randint(4, 8)
+            return rng.randint(4, 8)
         elif rating >= 75:
-            return random.randint(7, 12)
+            return rng.randint(7, 12)
         elif rating >= 70:
-            return random.randint(10, 15)
+            return rng.randint(10, 15)
         else:
-            return random.randint(14, 20)
+            return rng.randint(14, 20)
 
     def get_match_result(self, match_id: str) -> Optional[str]:
-        """Generate match result"""
-        if random.random() < 0.3:
-            return None
+        """Generate deterministic match result seeded from match_id."""
+        rng = self._rng("result", match_id)
+        if rng.random() < 0.3:
+            return None  # Match not yet finished
 
         outcomes = ["HOME_WIN", "DRAW", "AWAY_WIN"]
         weights = [0.46, 0.27, 0.27]
-        return random.choices(outcomes, weights=weights)[0]
+        return rng.choices(outcomes, weights=weights)[0]
+
+    def get_market_odds(self, home_team: str, away_team: str, league: str) -> Dict:
+        """
+        Generate deterministic mock market odds calibrated to team ratings.
+        Returns decimal odds for home / draw / away.
+        """
+        home_rating = self.get_team_rating(home_team, "overall")
+        away_rating = self.get_team_rating(away_team, "overall")
+
+        # Probability from ratings (with home advantage)
+        rating_diff = (home_rating - away_rating + 8) / 40.0
+        raw_home = max(0.20, min(0.70, 0.45 + rating_diff))
+        raw_away = max(0.15, min(0.65, 0.35 - rating_diff))
+        raw_draw = max(0.10, 1.0 - raw_home - raw_away)
+
+        # Normalise to sum to 1 then add vig (~5%)
+        total = raw_home + raw_draw + raw_away
+        vig = 1.05
+        home_impl = (raw_home / total) * vig
+        draw_impl = (raw_draw / total) * vig
+        away_impl = (raw_away / total) * vig
+
+        # Convert implied prob → decimal odds, add small noise
+        rng = self._rng("odds", home_team, away_team)
+        noise = lambda: rng.uniform(-0.05, 0.05)
+
+        return {
+            "home": round(max(1.10, 1.0 / home_impl + noise()), 2),
+            "draw": round(max(2.00, 1.0 / draw_impl + noise()), 2),
+            "away": round(max(1.10, 1.0 / away_impl + noise()), 2),
+        }
 
     def get_league_matches(self, league: str, days_ahead: int = 7) -> List[Dict]:
         """Generate realistic fixtures"""
@@ -426,6 +464,28 @@ class MockDataProvider:
         matches.sort(key=lambda x: (x["date"], x["time"]))
         return matches
 
+    def _generate_player_stats(self, position: str) -> tuple:
+        """Generate stats based on player position."""
+        if position == "Forward":
+            return (
+                random.randint(4, 18),
+                random.randint(2, 12),
+                round(random.uniform(6.8, 8.2), 1),
+            )
+        if position == "Midfielder":
+            return (
+                random.randint(1, 10),
+                random.randint(3, 14),
+                round(random.uniform(6.7, 8.0), 1),
+            )
+        if position == "Defender":
+            return (
+                random.randint(0, 4),
+                random.randint(0, 5),
+                round(random.uniform(6.5, 7.8), 1),
+            )
+        return 0, 0, round(random.uniform(6.4, 7.9), 1)
+
     def get_player_stats(self, team_name: str) -> List[Dict]:
         """Generate squad statistics"""
         positions = {"Goalkeeper": 2, "Defender": 7, "Midfielder": 7, "Forward": 4}
@@ -441,26 +501,7 @@ class MockDataProvider:
                         used_names.add(name)
                         break
 
-                if position == "Forward":
-                    goals, assists, rating = (
-                        random.randint(4, 18),
-                        random.randint(2, 12),
-                        round(random.uniform(6.8, 8.2), 1),
-                    )
-                elif position == "Midfielder":
-                    goals, assists, rating = (
-                        random.randint(1, 10),
-                        random.randint(3, 14),
-                        round(random.uniform(6.7, 8.0), 1),
-                    )
-                elif position == "Defender":
-                    goals, assists, rating = (
-                        random.randint(0, 4),
-                        random.randint(0, 5),
-                        round(random.uniform(6.5, 7.8), 1),
-                    )
-                else:
-                    goals, assists, rating = 0, 0, round(random.uniform(6.4, 7.9), 1)
+                goals, assists, rating = self._generate_player_stats(position)
 
                 appearances = random.randint(10, 28)
 

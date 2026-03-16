@@ -1,274 +1,390 @@
-import random
-from datetime import datetime
-from data_fetcher import DataFetcher
+"""
+prediction_engine.py — FootyOracle Prediction Engine
+
+Multi-factor model with:
+  - Recent form (30%)
+  - Head-to-head (20%)
+  - Home advantage (15%)
+  - Injury impact (15%)
+  - League position (10%)
+  - Rest days (10%)
+
+Only surfaces predictions where the model's probability beats the market
+by >= 15% (the "value edge"), ensuring we're not just predicting everything.
+"""
+
+import logging
 import os
+from datetime import datetime
+from typing import Optional
+
+from data_fetcher import DataFetcher
+
+logger = logging.getLogger(__name__)
+
+# Minimum edge over market to surface a prediction (PRD: 15%)
+MIN_EDGE = float(os.getenv("MIN_EDGE", "0.15"))
+# Minimum model confidence to surface a prediction (PRD: 60%)
+MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.60"))
 
 
 class PredictionEngine:
     """
-    Core prediction engine for football matches
+    Core prediction engine for football matches.
 
-    Uses multi-factor analysis:
-    - Team form (recent results)
-    - Injury impact
-    - Head-to-head record
-    - League table position
+    Uses multi-factor analysis to calculate true win/draw/loss probabilities,
+    then compares against market odds to identify value bets (edge >= 15%).
+
+    Factors:
+        form          30%  — weighted recent results (W=3, D=1, L=0)
+        h2h           20%  — historical head-to-head win rate
+        home_adv      15%  — fixed home advantage boost
+        injury        15%  — relative injury impact
+        position      10%  — normalised league table position
+        rest          10%  — days since last match
     """
 
-    def __init__(self):
-        self.data_fetcher = DataFetcher()
+    def __init__(self, data_fetcher: Optional[DataFetcher] = None):
+        self.data_fetcher = data_fetcher or DataFetcher()
 
-        self.prediction_debug = os.getenv("PREDICTION_DEBUG", "False").lower() == "true"
+        self.debug = os.getenv("PREDICTION_DEBUG", "False").lower() == "true"
         self.injuries_enabled = os.getenv("INJURIES_ENABLED", "True").lower() == "true"
 
-        # Weight configuration (tune these for better accuracy)
+        # Factor weights — must sum to 1.0
         self.weights = {
-            "form": 0.35,  # Recent form weight
-            "injury": 0.15,  # Injury impact weight
-            "h2h": 0.25,  # Head-to-head weight
-            "position": 0.25,  # Table position weight
+            "form": 0.30,
+            "h2h": 0.20,
+            "home_adv": 0.15,
+            "injury": 0.15,
+            "position": 0.10,
+            "rest": 0.10,
         }
 
-    def predict(self, home_team: str, away_team: str, league: str, match_id: str = None) -> dict:
-        """
-        Generate prediction for a match
+    # =========================================================================
+    # PUBLIC API
+    # =========================================================================
 
-        Args:
-            home_team: Home team name
-            away_team: Away team name
-            league: League code (EPL, LaLiga, etc.)
+    def predict(
+        self,
+        home_team: str,
+        away_team: str,
+        league: str,
+        match_id: str = None,
+    ) -> dict:
+        """
+        Generate prediction for a match.
+
+        Returns the full prediction payload including factors and edge.
+        Raises RuntimeError if no value edge found (use find_value separately).
 
         Returns:
             {
                 "matchId": "EPL-ARS-CHE-2026-02-12",
                 "prediction": "HOME_WIN",
                 "confidence": 0.74,
+                "edge": 0.21,
+                "marketOdds": {"home": 2.5, "draw": 3.2, "away": 2.8},
+                "trueProbabilities": {"home_win": 0.65, "draw": 0.20, "away_win": 0.15},
                 "factors": {...},
                 "timestamp": 1707696000
             }
         """
-
-        # Generate match ID (or accept a stable fixture-based id)
         if not match_id:
             match_id = self._generate_match_id(home_team, away_team, league)
 
-        # Calculate individual factors
-        form_score = self._calculate_form_score(home_team, away_team, league)
-        injury_impact = (
-            self._calculate_injury_impact(home_team, away_team, league)
-            if self.injuries_enabled
-            else 0.0
-        )
-        h2h_score = self._calculate_h2h_score(home_team, away_team, league)
-        position_score = self._calculate_position_score(home_team, away_team, league)
+        # --- Step 1: Calculate true probabilities from our model ---
+        true_probs, factors = self._calculate_probabilities(home_team, away_team, league)
 
-        # Combine factors
-        factors = {
-            "formScore": round(form_score, 2),
-            "injuryImpact": round(injury_impact, 2),
-            "h2hScore": round(h2h_score, 2),
-            "tablePositionScore": round(position_score, 2),
+        # --- Step 2: Fetch market odds ---
+        market_odds = self.data_fetcher.get_market_odds(home_team, away_team, league)
+
+        # --- Step 3: Find value bet (if any) ---
+        value_bet = None
+        if market_odds:
+            value_bet = self.find_value(true_probs, market_odds)
+
+        if value_bet is None:
+            if self.debug:
+                logger.debug(
+                    "No value found for %s vs %s | probs=%s | odds=%s",
+                    home_team,
+                    away_team,
+                    true_probs,
+                    market_odds,
+                )
+            raise RuntimeError(
+                f"No value edge >= {MIN_EDGE:.0%} found for {home_team} vs {away_team}"
+            )
+
+        # --- Step 4: Build outcome label ---
+        outcome_label_map = {
+            "home_win": "HOME_WIN",
+            "draw": "DRAW",
+            "away_win": "AWAY_WIN",
         }
+        prediction = outcome_label_map[value_bet["outcome"]]
+        confidence = round(value_bet["our_prob"], 2)
+        edge = round(value_bet["edge"], 3)
 
-        form_w = self.weights["form"]
-        injury_w = self.weights["injury"] if self.injuries_enabled else 0.0
-        h2h_w = self.weights["h2h"]
-        pos_w = self.weights["position"]
-
-        weight_sum = form_w + injury_w + h2h_w + pos_w
-        if weight_sum <= 0:
-            weight_sum = 1.0
-
-        # Calculate weighted total
-        total_score = (
-            form_score * (form_w / weight_sum)
-            + injury_impact * (injury_w / weight_sum)
-            + h2h_score * (h2h_w / weight_sum)
-            + position_score * (pos_w / weight_sum)
-        )
-
-        # Determine prediction
-        prediction, confidence = self._determine_outcome(total_score, factors)
-
-        if self.prediction_debug:
-            print(
-                f"      🔎 Factors: form={factors['formScore']}, injuries={factors['injuryImpact']}, h2h={factors['h2hScore']}, position={factors['tablePositionScore']}, total={round(total_score, 3)}"
+        if self.debug:
+            logger.debug(
+                "VALUE BET: %s vs %s → %s (conf=%.1f%%, edge=%.1f%%)",
+                home_team,
+                away_team,
+                prediction,
+                confidence * 100,
+                edge * 100,
             )
 
         return {
             "matchId": match_id,
             "prediction": prediction,
-            "confidence": round(confidence, 2),
+            "confidence": confidence,
+            "edge": edge,
+            "marketOdds": market_odds,
+            "trueProbabilities": {k: round(v, 3) for k, v in true_probs.items()},
             "factors": factors,
             "timestamp": int(datetime.now().timestamp()),
         }
 
+    def find_value(self, true_probs: dict, market_odds: dict) -> Optional[dict]:
+        """
+        Find the best value bet given our model probabilities and market odds.
+
+        Converts decimal odds to implied probabilities (with vig removed),
+        then finds the outcome where our model most exceeds the market.
+
+        Args:
+            true_probs:   {"home_win": 0.65, "draw": 0.20, "away_win": 0.15}
+            market_odds:  {"home": 2.50, "draw": 3.20, "away": 2.80}
+
+        Returns:
+            {"outcome": "home_win", "our_prob": 0.65, "market_prob": 0.40, "edge": 0.25}
+            or None if no value bet found
+        """
+        # Map market odds keys → probability keys
+        odds_to_prob_key = {
+            "home": "home_win",
+            "draw": "draw",
+            "away": "away_win",
+        }
+
+        # Step 1: Raw implied probabilities (include vig)
+        raw_implied = {}
+        for odds_key, prob_key in odds_to_prob_key.items():
+            price = market_odds.get(odds_key)
+            if not price or price <= 1.0:
+                return None  # Malformed odds — skip
+            raw_implied[prob_key] = 1.0 / price
+
+        # Step 2: Remove bookmaker vig (normalise to sum = 1.0)
+        total_implied = sum(raw_implied.values())
+        market_probs = {k: v / total_implied for k, v in raw_implied.items()}
+
+        # Step 3: Find the outcome with the greatest edge
+        best_edge = 0.0
+        best_bet = None
+
+        for outcome, our_prob in true_probs.items():
+            market_prob = market_probs.get(outcome, 0)
+            edge = our_prob - market_prob
+
+            if edge >= MIN_EDGE and our_prob >= MIN_CONFIDENCE:
+                if edge > best_edge:
+                    best_edge = edge
+                    best_bet = {
+                        "outcome": outcome,
+                        "our_prob": our_prob,
+                        "market_prob": round(market_prob, 3),
+                        "edge": edge,
+                    }
+
+        return best_bet
+
+    # =========================================================================
+    # PROBABILITY CALCULATION
+    # =========================================================================
+
+    def _calculate_probabilities(
+        self, home_team: str, away_team: str, league: str
+    ) -> tuple[dict, dict]:
+        """
+        Calculate true win/draw/loss probabilities using weighted factors.
+
+        Returns:
+            (true_probs, factors)
+            true_probs: {"home_win": 0.55, "draw": 0.25, "away_win": 0.20}
+            factors:    {"formScore": 0.2, ...}
+        """
+        # --- Individual factor scores (home advantage relative to away) ---
+        form_score = self._score_form(home_team, away_team, league)
+        h2h_score = self._score_h2h(home_team, away_team, league)
+        injury_score = (
+            self._score_injuries(home_team, away_team, league)
+            if self.injuries_enabled
+            else 0.0
+        )
+        position_score = self._score_position(home_team, away_team, league)
+        rest_score = self._score_rest(home_team, away_team, league)
+
+        # Home advantage is a fixed bonus — not relative
+        home_adv = self.weights["home_adv"]
+
+        # Effective injury weight (may be 0 if disabled)
+        injury_w = self.weights["injury"] if self.injuries_enabled else 0.0
+
+        # Normalise weights if injuries disabled
+        active_weights = {
+            "form": self.weights["form"],
+            "h2h": self.weights["h2h"],
+            "injury": injury_w,
+            "position": self.weights["position"],
+            "rest": self.weights["rest"],
+        }
+        total_w = sum(active_weights.values())
+        if total_w <= 0:
+            total_w = 1.0
+
+        # Weighted relative score (-1 → +1, positive = home favoured)
+        relative_score = (
+            form_score * (active_weights["form"] / total_w)
+            + h2h_score * (active_weights["h2h"] / total_w)
+            + injury_score * (active_weights["injury"] / total_w)
+            + position_score * (active_weights["position"] / total_w)
+            + rest_score * (active_weights["rest"] / total_w)
+        )
+
+        # Convert relative score [-1, +1] to raw home / away strengths [0, 1]
+        home_raw = 0.5 + relative_score / 2.0 + home_adv
+        away_raw = max(0.01, 1.0 - home_raw)
+        home_raw = max(0.01, home_raw)
+
+        # --- Draw probability: higher when teams are evenly matched ---
+        balance = 1.0 - abs(relative_score)  # 1.0 when perfectly balanced
+        draw_prob = max(0.18, min(0.35, 0.26 * balance + 0.08))
+
+        # Distribute remaining probability proportionally
+        remaining = 1.0 - draw_prob
+        total_raw = home_raw + away_raw
+        home_win_prob = (home_raw / total_raw) * remaining
+        away_win_prob = (away_raw / total_raw) * remaining
+
+        # Clamp to valid range
+        total = home_win_prob + draw_prob + away_win_prob
+        home_win_prob /= total
+        draw_prob /= total
+        away_win_prob /= total
+
+        factors = {
+            "formScore": round(form_score, 3),
+            "h2hScore": round(h2h_score, 3),
+            "injuryImpact": round(injury_score, 3),
+            "tablePositionScore": round(position_score, 3),
+            "restDaysScore": round(rest_score, 3),
+            "relativeScore": round(relative_score, 3),
+        }
+
+        true_probs = {
+            "home_win": round(home_win_prob, 3),
+            "draw": round(draw_prob, 3),
+            "away_win": round(away_win_prob, 3),
+        }
+
+        return true_probs, factors
+
+    # =========================================================================
+    # FACTOR SCORING — all return values in [-1.0, +1.0]
+    # Positive = home team has the advantage
+    # =========================================================================
+
+    def _score_form(self, home_team: str, away_team: str, league: str) -> float:
+        """Recent form — weighted points (W=3, D=1, L=0) over last 5 games."""
+        home_form = self.data_fetcher.get_team_form(home_team, league)
+        away_form = self.data_fetcher.get_team_form(away_team, league)
+
+        def points(form):
+            return sum(3 if r == "W" else 1 if r == "D" else 0 for r in form)
+
+        max_pts = len(home_form) * 3 or 1
+        home_norm = (points(home_form) / max_pts) * 2 - 1
+        away_norm = (points(away_form) / max(len(away_form) * 3, 1)) * 2 - 1
+
+        return float(max(-1.0, min(1.0, home_norm - away_norm)))
+
+    def _score_h2h(self, home_team: str, away_team: str, league: str) -> float:
+        """Head-to-head historical record."""
+        results = self.data_fetcher.get_h2h(home_team, away_team, league)
+        if not results:
+            return 0.0
+
+        home_wins = sum(1 for r in results if r == "HOME")
+        away_wins = sum(1 for r in results if r == "AWAY")
+        total = len(results)
+        return float(max(-1.0, min(1.0, (home_wins - away_wins) / total)))
+
+    def _score_injuries(self, home_team: str, away_team: str, league: str) -> float:
+        """
+        Relative injury impact.
+        Each injury reduces a team's effective strength by 0.07 (moderate/minor)
+        or 0.15 (severe). Positive = home team less injured.
+        """
+        home_injuries = self.data_fetcher.get_injuries(home_team, league)
+        away_injuries = self.data_fetcher.get_injuries(away_team, league)
+
+        severity_weights = {"severe": 0.15, "moderate": 0.07, "minor": 0.03}
+
+        def impact(injuries):
+            return sum(severity_weights.get(i.get("severity", "minor"), 0.03) for i in injuries)
+
+        home_impact = impact(home_injuries)
+        away_impact = impact(away_injuries)
+        return float(max(-1.0, min(1.0, away_impact - home_impact)))
+
+    def _score_position(self, home_team: str, away_team: str, league: str) -> float:
+        """League table position — normalised to [0, 1], then differenced."""
+        home_pos = self.data_fetcher.get_table_position(home_team, league)
+        away_pos = self.data_fetcher.get_table_position(away_team, league)
+        max_teams = 20
+        home_score = 1.0 - (home_pos / max_teams)
+        away_score = 1.0 - (away_pos / max_teams)
+        return float(max(-1.0, min(1.0, (home_score - away_score) * 2)))
+
+    def _score_rest(self, home_team: str, away_team: str, league: str) -> float:
+        """
+        Rest days advantage based on days since last match.
+        Currently uses mock rest values; real implementation would look up
+        last match date from the data fetcher.
+        Score per team: 0.0 (<=2 days) → 1.0 (>=5 days), linear in between.
+        """
+        # In real mode, derive from last match date; in mock mode use team hash
+        home_rest = self._estimate_rest_days(home_team, league)
+        away_rest = self._estimate_rest_days(away_team, league)
+
+        def rest_score(days: int) -> float:
+            if days >= 5:
+                return 1.0
+            if days <= 2:
+                return 0.0
+            return (days - 2) / 3.0
+
+        return float(max(-1.0, min(1.0, rest_score(home_rest) - rest_score(away_rest))))
+
+    def _estimate_rest_days(self, team: str, league: str) -> int:
+        """
+        Returns estimated rest days for a team.
+        In future: derive from last match timestamp via data_fetcher.
+        """
+        import hashlib
+        seed = int(hashlib.md5(f"{team}{league}rest".encode()).hexdigest(), 16) % 7
+        return 2 + seed  # 2–8 days range
+
+    # =========================================================================
+    # HELPERS
+    # =========================================================================
+
     def _generate_match_id(self, home_team: str, away_team: str, league: str) -> str:
-        """Generate unique match ID"""
+        """Generate unique match ID from team names, league and current date."""
         date_str = datetime.now().strftime("%Y-%m-%d")
         home_abbr = home_team[:3].upper()
         away_abbr = away_team[:3].upper()
         return f"{league}-{home_abbr}-{away_abbr}-{date_str}"
-
-    def _calculate_form_score(
-        self, home_team: str, away_team: str, league: str
-    ) -> float:
-        """
-        Calculate form score based on recent results
-
-        Returns: -1.0 to 1.0
-        - Positive = home team has better form
-        - Negative = away team has better form
-        """
-
-        # Fetch recent results
-        home_form = self.data_fetcher.get_team_form(home_team, league)
-        away_form = self.data_fetcher.get_team_form(away_team, league)
-
-        # Calculate form points (W=3, D=1, L=0)
-        home_points = sum([3 if r == "W" else 1 if r == "D" else 0 for r in home_form])
-        away_points = sum([3 if r == "W" else 1 if r == "D" else 0 for r in away_form])
-
-        # Normalize to -1 to 1 scale
-        max_points = len(home_form) * 3
-        home_normalized = (home_points / max_points * 2) - 1
-        away_normalized = (away_points / max_points * 2) - 1
-
-        # Return difference (home advantage)
-        form_diff = home_normalized - away_normalized
-
-        # Add home advantage boost (+0.1)
-        return min(1.0, max(-1.0, form_diff + 0.1))
-
-    def _calculate_injury_impact(
-        self, home_team: str, away_team: str, league: str
-    ) -> float:
-        """
-        Calculate injury impact on match
-
-        Returns: -1.0 to 1.0
-        - Positive = home team less affected by injuries
-        - Negative = away team less affected by injuries
-        """
-
-        # Fetch injury data
-        home_injuries = self.data_fetcher.get_injuries(home_team, league)
-        away_injuries = self.data_fetcher.get_injuries(away_team, league)
-
-        # Count key player injuries (simple version)
-        home_impact = len(home_injuries) * -0.1
-        away_impact = len(away_injuries) * -0.1
-
-        # Return relative impact
-        return min(1.0, max(-1.0, away_impact - home_impact))
-
-    def _calculate_h2h_score(
-        self, home_team: str, away_team: str, league: str
-    ) -> float:
-        """
-        Calculate head-to-head record score
-
-        Returns: -1.0 to 1.0
-        - Positive = home team historically dominates
-        - Negative = away team historically dominates
-        """
-
-        # Fetch H2H history
-        h2h_results = self.data_fetcher.get_h2h(home_team, away_team, league)
-
-        if not h2h_results:
-            return 0.0  # No history
-
-        # Count wins
-        home_wins = sum(1 for r in h2h_results if r == "HOME")
-        away_wins = sum(1 for r in h2h_results if r == "AWAY")
-
-        total = len(h2h_results)
-
-        # Normalize
-        h2h_score = (home_wins - away_wins) / total
-
-        return min(1.0, max(-1.0, h2h_score))
-
-    def _calculate_position_score(
-        self, home_team: str, away_team: str, league: str
-    ) -> float:
-        """
-        Calculate score based on league table positions
-
-        Returns: -1.0 to 1.0
-        - Positive = home team higher in table
-        - Negative = away team higher in table
-        """
-
-        # Fetch standings
-        home_position = self.data_fetcher.get_table_position(home_team, league)
-        away_position = self.data_fetcher.get_table_position(away_team, league)
-
-        # Lower position = better (1st place = 1)
-        # Normalize to -1 to 1 scale
-        max_teams = 20  # Typical league size
-
-        home_score = 1 - (home_position / max_teams)
-        away_score = 1 - (away_position / max_teams)
-
-        position_diff = (home_score - away_score) * 2
-
-        return min(1.0, max(-1.0, position_diff))
-
-    def _determine_outcome(self, total_score: float, factors: dict) -> tuple:
-        """
-        Determine final prediction and confidence
-
-        Args:
-            total_score: Combined weighted score (-1.0 to 1.0)
-            factors: Individual factor scores
-
-        Returns:
-            (prediction, confidence)
-            - prediction: "HOME_WIN", "DRAW", or "AWAY_WIN"
-            - confidence: 0.0 to 1.0
-        """
-
-        # Define thresholds
-        STRONG_HOME_THRESHOLD = 0.3
-        WEAK_HOME_THRESHOLD = 0.1
-        WEAK_AWAY_THRESHOLD = -0.1
-        STRONG_AWAY_THRESHOLD = -0.3
-
-        # Determine prediction
-        if total_score > STRONG_HOME_THRESHOLD:
-            prediction = "HOME_WIN"
-            base_confidence = 0.7
-        elif total_score > WEAK_HOME_THRESHOLD:
-            prediction = "HOME_WIN"
-            base_confidence = 0.6
-        elif total_score > WEAK_AWAY_THRESHOLD:
-            prediction = "DRAW"
-            base_confidence = 0.55
-        elif total_score > STRONG_AWAY_THRESHOLD:
-            prediction = "AWAY_WIN"
-            base_confidence = 0.6
-        else:
-            prediction = "AWAY_WIN"
-            base_confidence = 0.7
-
-        # Adjust confidence based on factor agreement
-        factor_values = list(factors.values())
-        factor_std = self._calculate_std(factor_values)
-
-        # Lower std = more agreement = higher confidence
-        confidence_boost = (1 - min(factor_std, 1.0)) * 0.15
-
-        final_confidence = min(0.95, base_confidence + confidence_boost)
-
-        return prediction, final_confidence
-
-    def _calculate_std(self, values: list) -> float:
-        """Calculate standard deviation"""
-        if not values:
-            return 0.0
-
-        mean = sum(values) / len(values)
-        variance = sum((x - mean) ** 2 for x in values) / len(values)
-        return variance**0.5

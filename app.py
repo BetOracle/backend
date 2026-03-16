@@ -1,3 +1,4 @@
+import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
@@ -5,6 +6,7 @@ import os
 import time
 from dotenv import load_dotenv
 
+from data_fetcher import DataFetcher
 from prediction_engine import PredictionEngine
 from resolver import MatchResolver
 from models import Prediction, PredictionDatabase
@@ -12,14 +14,27 @@ from models import Prediction, PredictionDatabase
 # Load environment variables
 load_dotenv()
 
+# Logging — respects LOG_LEVEL from .env (default INFO)
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend
 
-# Initialize components
-prediction_engine = PredictionEngine()
+# Shared DataFetcher — single instance so cache is shared across all components
+_data_fetcher = DataFetcher()
+
+# Initialize components (inject shared DataFetcher to avoid duplicate caches)
+prediction_engine = PredictionEngine(data_fetcher=_data_fetcher)
 resolver = MatchResolver()
 db = PredictionDatabase()
+
+logger.info("FootyOracle API initialized")
 
 # ============================================================================
 # PREDICTION ENDPOINTS
@@ -41,13 +56,14 @@ def get_upcoming_matches():
         except ValueError:
             days_ahead = 7
 
-        matches = prediction_engine.data_fetcher.get_league_matches(
+        matches = _data_fetcher.get_league_matches(
             league=league, days_ahead=days_ahead
         )
 
         return jsonify({"success": True, "league": league, "matches": matches}), 200
 
     except Exception as e:
+        logger.error("Error in get_upcoming_matches: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -138,10 +154,19 @@ def create_prediction():
             confidence=prediction_result["confidence"],
             factors=prediction_result["factors"],
             timestamp=prediction_result["timestamp"],
+            league=data["league"],
         )
 
         # Store in database
         prediction_id = db.add_prediction(prediction)
+
+        logger.info(
+            "Prediction created: %s → %s (conf=%.1f%%, edge=%.1f%%)",
+            prediction_result["matchId"],
+            prediction_result["prediction"],
+            prediction_result["confidence"] * 100,
+            prediction_result.get("edge", 0) * 100,
+        )
 
         # Return response
         return (
@@ -150,8 +175,12 @@ def create_prediction():
                     "success": True,
                     "predictionId": prediction_id,
                     "matchId": prediction.match_id,
+                    "league": prediction.league,
                     "prediction": prediction.predicted_outcome,
                     "confidence": prediction.confidence,
+                    "edge": prediction_result.get("edge"),
+                    "marketOdds": prediction_result.get("marketOdds"),
+                    "trueProbabilities": prediction_result.get("trueProbabilities"),
                     "factors": prediction.factors,
                     "timestamp": prediction.timestamp,
                 }
@@ -159,49 +188,58 @@ def create_prediction():
             201,
         )
 
+    except RuntimeError as e:
+        # No value bet found — not an error, just no pick today
+        logger.info("No value bet: %s", e)
+        return jsonify({"success": False, "error": str(e), "code": "NO_VALUE_BET"}), 200
+
     except Exception as e:
+        logger.error("Error in create_prediction: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/predictions", methods=["GET"])
 def get_all_predictions():
     """
-    Get all predictions
+    Get predictions — paginated and filterable.
 
     Query params:
+    - page:     page number (default 1, 1-indexed)
+    - limit:    results per page (default 50, max 100)
     - resolved: true/false (filter by resolution status)
-    - league: EPL/LaLiga/etc (filter by league)
-
-    Output JSON:
-    {
-        "success": true,
-        "predictions": [...]
-    }
+    - league:   EPL / LaLiga / etc (filter by league)
     """
     try:
-        # Get query parameters
-        resolved = request.args.get("resolved")
+        try:
+            page = max(1, int(request.args.get("page", 1)))
+            limit = min(100, max(1, int(request.args.get("limit", 50))))
+        except (TypeError, ValueError):
+            page, limit = 1, 50
+
+        resolved_param = request.args.get("resolved")
         league = request.args.get("league")
 
-        # Get predictions from database
-        predictions = db.get_all_predictions()
+        if league:
+            predictions = db.get_predictions_by_league(league, page=page, limit=limit)
+        else:
+            predictions = db.get_all_predictions(page=page, limit=limit)
 
-        # Filter if needed
-        if resolved is not None:
-            resolved_bool = resolved.lower() == "true"
+        # Optional resolved filter (applied after DB fetch for simplicity)
+        if resolved_param is not None:
+            resolved_bool = resolved_param.lower() == "true"
             predictions = [p for p in predictions if p.resolved == resolved_bool]
 
-        if league:
-            predictions = [p for p in predictions if league in p.match_id]
-
-        # Convert to dict
+        total = db.count_predictions()
         predictions_list = [p.to_dict() for p in predictions]
 
         return (
             jsonify(
                 {
                     "success": True,
+                    "page": page,
+                    "limit": limit,
                     "count": len(predictions_list),
+                    "total": total,
                     "predictions": predictions_list,
                 }
             ),
@@ -209,6 +247,7 @@ def get_all_predictions():
         )
 
     except Exception as e:
+        logger.error("Error in get_all_predictions: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -336,14 +375,16 @@ def auto_resolve():
         results = []
         errors = []
 
+        data = request.get_json(silent=True) or {}
+
         try:
-            max_items = int(request.args.get("max", "10"))
-        except ValueError:
+            max_items = int(data.get("max", 10))
+        except (ValueError, TypeError):
             max_items = 10
 
         try:
-            time_budget_seconds = float(request.args.get("timeBudgetSeconds", "20"))
-        except ValueError:
+            time_budget_seconds = float(data.get("timeBudgetSeconds", 20))
+        except (ValueError, TypeError):
             time_budget_seconds = 20.0
 
         if max_items < 1:
