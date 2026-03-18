@@ -38,20 +38,11 @@ def run_agent_cycle():
     logger.info("=" * 60)
     
     try:
-        # Run predictions for all leagues
-        agent.run_predictions()
-        logger.info("Predictions completed")
+        agent.run_once()
+        logger.info("Agent cycle completed")
     except Exception as e:
-        logger.error(f"Prediction cycle failed: {e}")
+        logger.error(f"Agent cycle failed: {e}")
         return False
-    
-    try:
-        # Auto-resolve completed matches
-        agent.auto_resolve()
-        logger.info("Auto-resolve completed")
-    except Exception as e:
-        logger.error(f"Auto-resolve failed: {e}")
-        # Don't fail the whole cycle if resolve fails
     
     logger.info("=" * 60)
     logger.info("Agent Cycle Complete")

@@ -178,7 +178,7 @@ def create_prediction():
 
         # Optionally submit to blockchain
         blockchain_result = None
-        if blockchain.enabled:
+        if blockchain and blockchain.enabled:
             try:
                 from datetime import datetime
                 # Parse match date from prediction

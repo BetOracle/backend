@@ -1,8 +1,8 @@
 # Frontend API Guide (FootyOracle Backend)
 
 Base URL:
-- Local: `http://localhost:5000`
-- Render (example): `https://backend-krxf.onrender.com`
+- Local: `http://localhost:5000` (default; configurable via `PORT`)
+- Railway (production): `https://web-production-34305.up.railway.app`
 
 All responses are JSON.
 
@@ -80,6 +80,8 @@ Expected:
 `GET /api/predictions`
 
 Query params:
+- `page` (optional) 1-indexed. Default `1`.
+- `limit` (optional) Default `50`, max `100`.
 - `league` (optional) e.g. `EPL`
 - `resolved` (optional) `true|false`
 
@@ -94,6 +96,10 @@ Response:
 ```json
 {
   "success": true,
+  "page": 1,
+  "limit": 50,
+  "count": 1,
+  "total": 1,
   "predictions": [
     {
       "predictionId": "offchain-1700000000",
@@ -108,6 +114,31 @@ Response:
       "resolutionTimestamp": null
     }
   ]
+}
+```
+
+---
+
+### Get a single prediction
+`GET /api/predictions/:predictionId`
+
+Response:
+
+```json
+{
+  "success": true,
+  "prediction": {
+    "predictionId": "offchain-1700000000",
+    "matchId": "EPL-123456",
+    "prediction": "HOME_WIN",
+    "confidence": 0.74,
+    "factors": {},
+    "timestamp": 1700000000,
+    "resolved": false,
+    "actualOutcome": null,
+    "correct": null,
+    "resolutionTimestamp": null
+  }
 }
 ```
 
@@ -134,17 +165,39 @@ Response:
   "success": true,
   "predictionId": "offchain-1700000000",
   "matchId": "EPL-123456",
+  "league": "EPL",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
+  "edge": 0.18,
+  "marketOdds": {
+    "home": 2.5,
+    "draw": 3.2,
+    "away": 2.8
+  },
+  "trueProbabilities": {
+    "home": 0.42,
+    "draw": 0.28,
+    "away": 0.30
+  },
   "factors": {
     "formScore": 0.7,
     "injuryImpact": -0.1,
     "h2hScore": 0.6,
     "tablePositionScore": 0.8
   },
-  "timestamp": 1700000000
+  "timestamp": 1700000000,
+  "blockchain": {
+    "submitted": false,
+    "txHash": null,
+    "onChainId": null,
+    "error": null
+  }
 }
 ```
+
+Notes:
+- If blockchain is disabled, the `blockchain` field may be omitted.
+- If no value bet is found, the API returns `success=false` with `code=NO_VALUE_BET`.
 
 ---
 
@@ -169,6 +222,33 @@ Request (agent payload):
 ```
 
 Response: same shape as above.
+
+---
+
+### Auto-resolve pending predictions
+`POST /api/resolve/auto`
+
+Optional JSON body:
+
+```json
+{
+  "max": 10,
+  "timeBudgetSeconds": 20
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "resolved": 0,
+  "processed": 0,
+  "remaining": 0,
+  "results": [],
+  "errors": []
+}
+```
 
 ---
 
@@ -215,6 +295,30 @@ Response:
   "correct": true
 }
 ```
+
+---
+
+### Agent status (frontend dashboard)
+`GET /api/agent/status`
+
+Response (shape may evolve):
+
+```json
+{
+  "success": true,
+  "service": "FootyOracle Backend",
+  "blockchain": {
+    "enabled": false
+  }
+}
+```
+
+---
+
+### Root (endpoint listing)
+`GET /`
+
+Returns an endpoint map for quick discovery.
 
 ---
 
