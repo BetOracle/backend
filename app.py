@@ -11,6 +11,9 @@ from prediction_engine import PredictionEngine
 from resolver import MatchResolver
 from models import Prediction, PredictionDatabase
 
+# Load environment variables
+load_dotenv()
+
 # Blockchain integration — optional, only loaded when BLOCKCHAIN_ENABLED=True
 _blockchain_enabled = os.getenv("BLOCKCHAIN_ENABLED", "False").lower() == "true"
 BlockchainClient = None
@@ -23,10 +26,6 @@ if _blockchain_enabled:
             "On-chain recording will be skipped."
         )
         _blockchain_enabled = False
-
-
-# Load environment variables
-load_dotenv()
 
 # Logging — respects LOG_LEVEL from .env (default INFO)
 logging.basicConfig(
@@ -49,7 +48,7 @@ resolver = MatchResolver()
 db = PredictionDatabase()
 
 # Initialize blockchain client (optional - only if BLOCKCHAIN_ENABLED=True)
-blockchain = BlockchainClient()
+blockchain = BlockchainClient() if (_blockchain_enabled and BlockchainClient) else None
 
 logger.info("FootyOracle API initialized")
 
