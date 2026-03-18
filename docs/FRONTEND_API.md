@@ -198,6 +198,10 @@ Response:
 Notes:
 - If blockchain is disabled, the `blockchain` field may be omitted.
 - If no value bet is found, the API returns `success=false` with `code=NO_VALUE_BET`.
+- If `blockchain.submitted` is true, you can link to CeloScan:
+  ```
+  https://celoscan.io/tx/{blockchain.txHash}
+  ```
 
 ---
 
@@ -221,7 +225,7 @@ Request (agent payload):
 }
 ```
 
-Response: same shape as above.
+Response: same shape as above (may include `blockchain` field if on-chain submission is enabled for this endpoint).
 
 ---
 
@@ -301,14 +305,17 @@ Response:
 ### Agent status (frontend dashboard)
 `GET /api/agent/status`
 
-Response (shape may evolve):
+Response (shape may evolve; includes blockchain status when enabled):
 
 ```json
 {
   "success": true,
   "service": "FootyOracle Backend",
   "blockchain": {
-    "enabled": false
+    "enabled": true,
+    "agentWallet": "0x8929c7C546aF792E044326ff492439F02fD13373",
+    "predictionContract": "0xd5049F6550aefC772ABDa57013fB01aB718054Ef",
+    "chainId": 42220
   }
 }
 ```
