@@ -11,6 +11,20 @@ from prediction_engine import PredictionEngine
 from resolver import MatchResolver
 from models import Prediction, PredictionDatabase
 
+# Blockchain integration — optional, only loaded when BLOCKCHAIN_ENABLED=True
+_blockchain_enabled = os.getenv("BLOCKCHAIN_ENABLED", "False").lower() == "true"
+BlockchainClient = None
+if _blockchain_enabled:
+    try:
+        from blockchain_client import BlockchainClient  # type: ignore
+    except ImportError:
+        logging.getLogger(__name__).warning(
+            "BLOCKCHAIN_ENABLED=True but blockchain_client could not be imported. "
+            "On-chain recording will be skipped."
+        )
+        _blockchain_enabled = False
+
+
 # Load environment variables
 load_dotenv()
 
@@ -33,6 +47,9 @@ _data_fetcher = DataFetcher()
 prediction_engine = PredictionEngine(data_fetcher=_data_fetcher)
 resolver = MatchResolver()
 db = PredictionDatabase()
+
+# Initialize blockchain client (optional - only if BLOCKCHAIN_ENABLED=True)
+blockchain = BlockchainClient()
 
 logger.info("FootyOracle API initialized")
 
@@ -160,6 +177,30 @@ def create_prediction():
         # Store in database
         prediction_id = db.add_prediction(prediction)
 
+        # Optionally submit to blockchain
+        blockchain_result = None
+        if blockchain.enabled:
+            try:
+                from datetime import datetime
+                # Parse match date from prediction
+                match_date_ts = int(prediction.timestamp)  # Use prediction timestamp as fallback
+                
+                blockchain_result = blockchain.submit_prediction(
+                    home_team=data["homeTeam"],
+                    away_team=data["awayTeam"],
+                    league=data["league"],
+                    prediction=prediction_result["prediction"],
+                    confidence=prediction_result["confidence"],
+                    match_date=match_date_ts,
+                )
+                
+                if blockchain_result.success:
+                    logger.info(f"Prediction recorded on-chain: {blockchain_result.tx_hash}")
+                else:
+                    logger.warning(f"Blockchain submission failed: {blockchain_result.error}")
+            except Exception as e:
+                logger.error(f"Blockchain submission error: {e}")
+
         logger.info(
             "Prediction created: %s → %s (conf=%.1f%%, edge=%.1f%%)",
             prediction_result["matchId"],
@@ -169,24 +210,30 @@ def create_prediction():
         )
 
         # Return response
-        return (
-            jsonify(
-                {
-                    "success": True,
-                    "predictionId": prediction_id,
-                    "matchId": prediction.match_id,
-                    "league": prediction.league,
-                    "prediction": prediction.predicted_outcome,
-                    "confidence": prediction.confidence,
-                    "edge": prediction_result.get("edge"),
-                    "marketOdds": prediction_result.get("marketOdds"),
-                    "trueProbabilities": prediction_result.get("trueProbabilities"),
-                    "factors": prediction.factors,
-                    "timestamp": prediction.timestamp,
-                }
-            ),
-            201,
-        )
+        response_data = {
+            "success": True,
+            "predictionId": prediction_id,
+            "matchId": prediction.match_id,
+            "league": prediction.league,
+            "prediction": prediction.predicted_outcome,
+            "confidence": prediction.confidence,
+            "edge": prediction_result.get("edge"),
+            "marketOdds": prediction_result.get("marketOdds"),
+            "trueProbabilities": prediction_result.get("trueProbabilities"),
+            "factors": prediction.factors,
+            "timestamp": prediction.timestamp,
+        }
+        
+        # Include blockchain info if available
+        if blockchain_result:
+            response_data["blockchain"] = {
+                "submitted": blockchain_result.success,
+                "txHash": blockchain_result.tx_hash,
+                "onChainId": blockchain_result.prediction_id,
+                "error": blockchain_result.error,
+            }
+
+        return jsonify(response_data), 201
 
     except RuntimeError as e:
         # No value bet found — not an error, just no pick today
@@ -428,7 +475,8 @@ def auto_resolve():
             )
             processed += 1
 
-        remaining = max(0, len(unresolved) - processed)
+        # remaining = unresolved predictions that we touched but couldn't resolve yet
+        remaining = max(0, len(unresolved) - len(results))
         return (
             jsonify(
                 {
@@ -516,6 +564,63 @@ def get_league_stats(league):
 
 
 # ============================================================================
+# AGENT STATUS
+# ============================================================================
+
+
+@app.route("/api/agent/status", methods=["GET"])
+def get_agent_status():
+    """
+    Live agent status — consolidated view for judges / frontend.
+
+    Output JSON:
+    {
+        "success": true,
+        "stats": { ... },
+        "lastPrediction": { ... } | null,
+        "recentPredictions": [ ... ]
+    }
+    """
+    try:
+        stats = db.get_statistics()
+
+        # Most recent prediction
+        recent = db.get_all_predictions(page=1, limit=5)
+        last_prediction = recent[0].to_dict() if recent else None
+        recent_list = [p.to_dict() for p in recent]
+
+        # Per-league breakdown
+        leagues = ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1"]
+        league_stats = []
+        for lg in leagues:
+            lg_preds = db.get_predictions_by_league(lg, page=1, limit=1000)
+            if lg_preds:
+                resolved = sum(1 for p in lg_preds if p.resolved)
+                correct = sum(1 for p in lg_preds if p.resolved and p.correct)
+                league_stats.append({
+                    "league": lg,
+                    "total": len(lg_preds),
+                    "resolved": resolved,
+                    "correct": correct,
+                    "accuracy": round(correct / resolved * 100, 1) if resolved else 0,
+                })
+
+        return jsonify({
+            "success": True,
+            "agent": "FootyOracle AI Agent",
+            "version": "1.0.0",
+            "stats": stats,
+            "leagueBreakdown": league_stats,
+            "lastPrediction": last_prediction,
+            "recentPredictions": recent_list,
+        }), 200
+
+    except Exception as e:
+        logger.error("Error in get_agent_status: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ============================================================================
 # HEALTH CHECK
 # ============================================================================
 
@@ -523,12 +628,13 @@ def get_league_stats(league):
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
-    return (
-        jsonify(
-            {"status": "healthy", "service": "FootyOracle Backend", "version": "1.0.0"}
-        ),
-        200,
-    )
+    status = {
+        "status": "healthy", 
+        "service": "FootyOracle Backend", 
+        "version": "1.0.0",
+        "blockchain": blockchain.get_connection_status() if blockchain else {"enabled": False},
+    }
+    return jsonify(status), 200
 
 
 @app.route("/", methods=["GET"])
@@ -540,13 +646,15 @@ def root():
                 "service": "FootyOracle Backend API",
                 "version": "1.0.0",
                 "endpoints": {
+                    "GET /api/matches": "Get upcoming matches for a league",
                     "POST /api/predict": "Create new prediction",
-                    "GET /api/predictions": "Get all predictions",
+                    "GET /api/predictions": "Get all predictions (paginated, filterable)",
                     "GET /api/predictions/:id": "Get specific prediction",
                     "POST /api/resolve": "Resolve prediction manually",
-                    "POST /api/resolve/auto": "Auto-resolve all pending",
+                    "POST /api/resolve/auto": "Auto-resolve all pending predictions",
                     "GET /api/stats": "Get overall statistics",
                     "GET /api/stats/league/:league": "Get league statistics",
+                    "GET /api/agent/status": "Live agent status (predictions, accuracy, league breakdown)",
                     "GET /health": "Health check",
                 },
                 "documentation": "See README.md for full API documentation",

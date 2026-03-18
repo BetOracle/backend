@@ -120,7 +120,7 @@ class FootyOracleAgent:
 
             try:
                 prediction = self._generate_prediction(match, league, match_id)
-                self._record_prediction(prediction, match)
+                self._record_prediction(prediction, match, league)
                 predictions_made += 1
                 logger.info(
                     "Predicted: %s vs %s → %s (conf=%.1f%%, edge=%.1f%%)",
@@ -215,8 +215,11 @@ class FootyOracleAgent:
 
         return prediction
 
-    def _record_prediction(self, prediction_data: dict, match: dict = None):
+    def _record_prediction(self, prediction_data: dict, match: dict = None, league: str = ""):
         """Record prediction in local DB and send to backend API."""
+
+        # Derive league: use explicit param if available, fall back to matchId prefix
+        resolved_league = league or (prediction_data.get("matchId", "-").split("-")[0] if prediction_data.get("matchId") else "")
 
         # Save locally
         if self.db:
@@ -226,7 +229,7 @@ class FootyOracleAgent:
                 confidence=prediction_data["confidence"],
                 factors=prediction_data["factors"],
                 timestamp=prediction_data["timestamp"],
-                league=prediction_data.get("matchId", "-").split("-")[0] if prediction_data.get("matchId") else "",
+                league=resolved_league,
             )
             self.db.add_prediction(prediction)
 

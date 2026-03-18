@@ -21,8 +21,15 @@ discord.py==2.3.2
 # Numerical / statistical
 numpy==2.0.2
 
+# AI Enrichment (optional - set AI_MOCK_MODE=True to skip)
+anthropic>=0.40.0
+openai>=1.0.0
+
 # Production server
 gunicorn==22.0.0
+
+# Blockchain (Celo/Web3)
+web3>=6.0.0
 
 # Development Tools
 pytest==7.4.4

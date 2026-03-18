@@ -1,7 +1,7 @@
 import logging
 import requests
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 import time
 import re
@@ -9,39 +9,32 @@ import unicodedata
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from mock_data import MockDataProvider
+from ai_enrichment import AIEnricher, AIEnrichedData
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 _MISSING_FOOTBALL_API_KEY = "Missing FOOTBALL_API_KEY"
-_MISSING_RAPIDAPI_KEY = "Missing RAPIDAPI_KEY"
-_MISSING_ODDS_API_KEY = "Missing ODDS_API_KEY"
-
-# League code mapping for the-odds-api.com sport keys
-_ODDS_API_SPORT_KEYS = {
-    "EPL": "soccer_epl",
-    "LaLiga": "soccer_spain_la_liga",
-    "SerieA": "soccer_italy_serie_a",
-    "Bundesliga": "soccer_germany_bundesliga",
-    "Ligue1": "soccer_france_ligue_one",
-}
 
 
 class DataFetcher:
     """
-    Fetch football data from multiple APIs
+    Fetch football data from football-data.org with AI enrichment.
 
-    Primary APIs:
-    - football-data.org (matches, standings, teams)
-    - API-Football/RapidAPI (injuries, player stats)
-    - TheSportsDB (additional data)
+    Primary API:
+    - football-data.org (matches, standings, teams, form)
+
+    AI Enrichment (replaces broken APIs):
+    - AI-powered injury analysis
+    - AI-generated form insights
+    - AI market insights (replaces odds API)
 
     Features:
     - Automatic fallback to mock data
     - Response caching
     - Rate limit handling
-    - Multi-source redundancy
+    - AI-powered data enrichment
     """
 
     def __init__(self):
@@ -51,25 +44,12 @@ class DataFetcher:
             "FOOTBALL_API_URL", "https://api.football-data.org/v4"
         )
 
-        self.rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
-        self.rapidapi_url = os.getenv(
-            "RAPIDAPI_URL", "https://v3.football.api-sports.io"
-        )
-
-        # Market odds API (the-odds-api.com)
-        self.odds_api_key = os.getenv("ODDS_API_KEY", "")
-        self.odds_api_url = "https://api.the-odds-api.com/v4"
+        # AI Enrichment (replaces broken RapidAPI and Odds API)
+        self.ai_enricher = AIEnricher()
+        self.ai_enrichment_enabled = os.getenv("AI_ENRICHMENT_ENABLED", "True").lower() == "true"
 
         # Agent ID (read-only — set by Nnenna after contract deployment)
         self.agent_id = os.getenv("AGENT_ID", "")
-
-        self.rapidapi_season = int(
-            os.getenv("RAPIDAPI_SEASON", str(datetime.now().year))
-        )
-        self.rapidapi_host = os.getenv("RAPIDAPI_HOST", "")
-        if not self.rapidapi_host:
-            parsed = urlparse(self.rapidapi_url)
-            self.rapidapi_host = parsed.netloc
 
         # Mock mode
         self.mock_mode = os.getenv("MOCK_MODE", "True").lower() == "true"
@@ -88,7 +68,7 @@ class DataFetcher:
         # Mock data provider
         self.mock = MockDataProvider()
 
-        # League ID mappings
+        # League ID mappings (football-data.org only)
         self.league_ids = {
             "football_data": {
                 "EPL": "PL",
@@ -96,13 +76,6 @@ class DataFetcher:
                 "SerieA": "SA",
                 "Bundesliga": "BL1",
                 "Ligue1": "FL1",
-            },
-            "rapidapi": {
-                "EPL": 39,
-                "LaLiga": 140,
-                "SerieA": 135,
-                "Bundesliga": 78,
-                "Ligue1": 61,
             },
         }
 
@@ -116,10 +89,8 @@ class DataFetcher:
             logger.info("DataFetcher: Real API mode")
             if self.football_api_key:
                 logger.info("  football-data.org connected")
-            if self.rapidapi_key:
-                logger.info("  RapidAPI connected")
-            if self.strict_real_data:
-                logger.info("  Strict real-data mode (no mock fallback)")
+            if self.ai_enrichment_enabled:
+                logger.info("  AI enrichment enabled")
 
     def _strict_fail(self, reason: str):
         if self.strict_real_data and not self.mock_mode:
@@ -382,14 +353,14 @@ class DataFetcher:
         return None
 
     # =========================================================================
-    # INJURIES
+    # INJURIES (AI-Powered)
     # =========================================================================
 
     def get_injuries(self, team_name: str, league: str) -> List[Dict]:
         """
-        Get injury list
+        Get injury list via AI enrichment.
 
-        Source: API-Football (RapidAPI)
+        Source: AI analysis (replaces broken RapidAPI)
         Fallback: Mock data
 
         Returns:
@@ -405,94 +376,46 @@ class DataFetcher:
         """
         if self.mock_mode:
             return self.mock.get_injuries(team_name)
-        if not self.rapidapi_key:
-            return []
 
-        try:
-            league_id = self._get_league_id(league, "rapidapi")
-            team_id = self._get_team_id_rapidapi(team_name, league_id)
-
-            if not team_id:
-                self._strict_fail(
-                    f"Could not resolve RapidAPI team id for '{team_name}'"
+        # Use AI enrichment for injury data
+        if self.ai_enrichment_enabled and self.ai_enricher:
+            try:
+                # Get enriched data with empty form (injuries only)
+                enriched = self.ai_enricher.enrich_match_data(
+                    home_team=team_name,
+                    away_team="",
+                    league=league,
+                    home_form=[],
+                    away_form=[],
+                    h2h_record=[],
                 )
-                return []
+                
+                # Filter injuries for this team
+                team_injuries = [
+                    inj for inj in enriched.injury_report
+                    if inj.get("team") == "home" or not inj.get("team")
+                ]
+                
+                # Format to expected structure
+                injuries = []
+                for inj in team_injuries:
+                    injuries.append({
+                        "player": inj.get("player", "Unknown"),
+                        "position": inj.get("position", "Unknown"),
+                        "severity": inj.get("severity", "medium"),
+                        "reason": inj.get("reason", "Unavailable"),
+                    })
+                
+                if injuries:
+                    logger.info(f"AI enrichment found {len(injuries)} injuries for {team_name}")
+                    return injuries
+                    
+            except Exception as e:
+                logger.warning(f"AI injury enrichment failed: {e}")
 
-            url = f"{self.rapidapi_url}/injuries?season={self.rapidapi_season}&team={team_id}"
-            headers = {
-                "X-RapidAPI-Key": self.rapidapi_key,
-                "X-RapidAPI-Host": self.rapidapi_host,
-            }
+        # Fallback to mock
+        return self.mock.get_injuries(team_name)
 
-            data = self._make_request(url, headers, f"injuries_{team_id}")
-
-            if not data or "response" not in data:
-                self._strict_fail("No injuries returned")
-                return []
-
-            injuries = []
-            for injury in data["response"]:
-                player_name = injury.get("player", {}).get("name", "Unknown")
-                injury_type = injury.get("player", {}).get("type", "Unknown")
-                reason = injury.get("player", {}).get("reason", "")
-
-                if any(word in reason.lower() for word in ["fracture", "torn", "rupture"]):
-                    severity = "severe"
-                elif any(word in reason.lower() for word in ["strain", "sprain", "knock"]):
-                    severity = "moderate"
-                else:
-                    severity = "minor"
-
-                injuries.append(
-                    {
-                        "player": player_name,
-                        "position": injury.get("player", {}).get("position", "Unknown"),
-                        "severity": severity,
-                        "reason": reason,
-                        "type": injury_type,
-                    }
-                )
-
-            return injuries
-
-        except Exception as e:
-            if not self.strict_real_data:
-                print(f"Error fetching injuries: {e}")
-            self._strict_fail(f"Error fetching injuries: {e}")
-            return []
-
-    def _get_team_id_rapidapi(self, team_name: str, league_id: int) -> Optional[int]:
-        """Get team ID from RapidAPI"""
-        url = f"{self.rapidapi_url}/teams?league={league_id}&season={self.rapidapi_season}"
-        headers = {
-            "X-RapidAPI-Key": self.rapidapi_key,
-            "X-RapidAPI-Host": self.rapidapi_host,
-        }
-
-        data = self._make_request(url, headers, f"teams_rapid_{league_id}")
-
-        if not data or "response" not in data:
-            return None
-
-        target_norm = self._normalize_team_name(team_name)
-        best_id = None
-        best_score = -1
-        best_len = 10**9
-
-        for team_data in data["response"]:
-            team = team_data.get("team", {})
-            candidate_name = team.get("name", "")
-            candidate_norm = self._normalize_team_name(candidate_name)
-            score = self._string_token_score(target_norm, candidate_norm)
-            if score > best_score or (score == best_score and len(candidate_norm) < best_len):
-                best_score = score
-                best_len = len(candidate_norm)
-                best_id = team.get("id")
-
-        if best_score <= 0:
-            return None
-
-        return best_id
 
     # =========================================================================
     # HEAD-TO-HEAD
@@ -775,68 +698,15 @@ class DataFetcher:
             return self.mock.get_league_matches(league, days_ahead)
 
     # =========================================================================
-    # MARKET ODDS
+    # MARKET ODDS (AI-Powered)
     # =========================================================================
-
-    def _extract_odds_from_event(self, best_event: Dict, event_home: str) -> Optional[Tuple[List[float], List[float], List[float]]]:
-        """Extract home, draw, and away odds from bookmaker data."""
-        home_prices, draw_prices, away_prices = [], [], []
-
-        for bookmaker in best_event.get("bookmakers", []):
-            for market in bookmaker.get("markets", []):
-                if market.get("key") != "h2h":
-                    continue
-                self._collect_prices_from_market(market, event_home, home_prices, draw_prices, away_prices)
-
-        if not home_prices:
-            return None
-        return home_prices, draw_prices, away_prices
-
-    def _collect_prices_from_market(
-        self,
-        market: Dict,
-        event_home: str,
-        home_prices: List[float],
-        draw_prices: List[float],
-        away_prices: List[float]
-    ) -> None:
-        """Collect prices from a single market's outcomes."""
-        for outcome in market.get("outcomes", []):
-            name = outcome.get("name", "")
-            price = float(outcome.get("price", 0))
-            if price <= 1.0:
-                continue
-            if name == event_home:
-                home_prices.append(price)
-            elif name == "Draw":
-                draw_prices.append(price)
-            else:
-                away_prices.append(price)
-
-    def _find_best_matching_event(self, events: List[Dict], home_norm: str, away_norm: str) -> Optional[Dict]:
-        """Find the event that best matches the given team names."""
-        best_event = None
-        best_score = -1
-
-        for event in events:
-            event_home_norm = self._normalize_team_name(event.get("home_team", ""))
-            event_away_norm = self._normalize_team_name(event.get("away_team", ""))
-            score = (
-                self._string_token_score(home_norm, event_home_norm)
-                + self._string_token_score(away_norm, event_away_norm)
-            )
-            if score > best_score:
-                best_score = score
-                best_event = event
-
-        return best_event if best_event and best_score > 0 else None
 
     def get_market_odds(self, home_team: str, away_team: str, league: str) -> Optional[Dict]:
         """
-        Fetch current market odds for a match from the-odds-api.com.
+        Get market odds via AI enrichment (replaces the-odds-api.com).
 
-        Source: the-odds-api.com
-        Fallback: calibrated mock odds based on team ratings
+        Source: AI probability estimates converted to odds
+        Fallback: calibrated mock odds
 
         Returns:
             {
@@ -844,47 +714,47 @@ class DataFetcher:
                 "draw": 3.20,   # decimal odds — draw
                 "away": 2.80    # decimal odds — away win
             }
-            or None if odds cannot be retrieved
+            or None if odds cannot be generated
         """
-        if self.mock_mode or not self.odds_api_key:
+        if self.mock_mode:
             return self.mock.get_market_odds(home_team, away_team, league)
 
-        try:
-            sport_key = _ODDS_API_SPORT_KEYS.get(league, "soccer_epl")
-            url = f"{self.odds_api_url}/sports/{sport_key}/odds/"
-            params = {
-                "apiKey": self.odds_api_key,
-                "regions": "uk",
-                "markets": "h2h",
-                "oddsFormat": "decimal",
-            }
+        # Try AI enrichment first
+        if self.ai_enrichment_enabled and self.ai_enricher:
+            try:
+                insights = self.ai_enricher.get_market_insights(home_team, away_team, league)
+                
+                if insights:
+                    # Convert probabilities to decimal odds (odds = 1 / prob)
+                    home_prob = insights.get("home_win_prob", 0.33)
+                    draw_prob = insights.get("draw_prob", 0.33)
+                    away_prob = insights.get("away_win_prob", 0.33)
+                    
+                    # Ensure minimum probability to avoid extreme odds
+                    min_prob = 0.05
+                    home_prob = max(home_prob, min_prob)
+                    draw_prob = max(draw_prob, min_prob)
+                    away_prob = max(away_prob, min_prob)
+                    
+                    # Normalize to sum to 1
+                    total = home_prob + draw_prob + away_prob
+                    home_prob /= total
+                    draw_prob /= total
+                    away_prob /= total
+                    
+                    odds = {
+                        "home": round(1.0 / home_prob, 2),
+                        "draw": round(1.0 / draw_prob, 2),
+                        "away": round(1.0 / away_prob, 2),
+                        "source": "ai",
+                        "confidence": insights.get("confidence", "medium"),
+                    }
+                    
+                    logger.info(f"AI market odds for {home_team} vs {away_team}: {odds}")
+                    return odds
+                    
+            except Exception as e:
+                logger.warning(f"AI market odds failed: {e}")
 
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code != 200:
-                print(f"⚠️  Odds API error {response.status_code}: {response.text}")
-                return self.mock.get_market_odds(home_team, away_team, league)
-
-            events = response.json()
-            home_norm = self._normalize_team_name(home_team)
-            away_norm = self._normalize_team_name(away_team)
-
-            best_event = self._find_best_matching_event(events, home_norm, away_norm)
-            if not best_event:
-                return self.mock.get_market_odds(home_team, away_team, league)
-
-            # Average odds across all bookmakers for robustness
-            event_home = best_event.get("home_team", "")
-            odds_result = self._extract_odds_from_event(best_event, event_home)
-            if not odds_result:
-                return self.mock.get_market_odds(home_team, away_team, league)
-
-            home_prices, draw_prices, away_prices = odds_result
-            return {
-                "home": round(sum(home_prices) / len(home_prices), 3),
-                "draw": round(sum(draw_prices) / len(draw_prices), 3) if draw_prices else 3.40,
-                "away": round(sum(away_prices) / len(away_prices), 3) if away_prices else 3.40,
-            }
-
-        except Exception as e:
-            print(f"❌ Error fetching market odds: {e}")
-            return self.mock.get_market_odds(home_team, away_team, league)
+        # Fallback to mock
+        return self.mock.get_market_odds(home_team, away_team, league)

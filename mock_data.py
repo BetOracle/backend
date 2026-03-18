@@ -415,26 +415,36 @@ class MockDataProvider:
         }
 
     def get_league_matches(self, league: str, days_ahead: int = 7) -> List[Dict]:
-        """Generate realistic fixtures"""
+        """Generate realistic fixtures — seeded per league+day so the agent sees
+        the same fixtures across every hourly cycle (preventing duplicate predictions)."""
         teams = self.league_teams.get(league, self.league_teams["EPL"])
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        # Seed by league + today so fixtures are stable for the whole day
+        rng = self._rng("fixtures", league, today_str)
 
-        num_matches = random.randint(8, 12)
+        num_matches = rng.randint(8, min(12, len(teams) // 2))
         matches = []
-        used_teams = set()
+        used_teams: set = set()
 
         for _ in range(num_matches):
-            for _ in range(20):  # Try up to 20 times to find valid matchup
-                home = random.choice(teams)
-                available = [t for t in teams if t != home and t not in used_teams]
-
+            home = None
+            away = None
+            for _ in range(20):  # Try up to 20 times to find a valid, unique pair
+                candidate_home = rng.choice(teams)
+                available = [t for t in teams if t != candidate_home and t not in used_teams]
                 if not available:
                     used_teams.clear()
-                    available = [t for t in teams if t != home]
-
-                away = random.choice(available)
-
-                if home not in used_teams:
+                    available = [t for t in teams if t != candidate_home]
+                if not available:
                     break
+                candidate_away = rng.choice(available)
+                if candidate_home not in used_teams:
+                    home = candidate_home
+                    away = candidate_away
+                    break
+
+            if home is None or away is None:
+                continue
 
             used_teams.add(home)
             used_teams.add(away)
@@ -442,21 +452,21 @@ class MockDataProvider:
             if len(used_teams) > len(teams) * 0.6:
                 used_teams.clear()
 
-            days_offset = random.randint(1, days_ahead)
+            days_offset = rng.randint(1, days_ahead)
             match_date = datetime.now() + timedelta(days=days_offset)
 
             # Weekend vs weekday times
             if match_date.weekday() in [5, 6]:
-                time = random.choice(["12:30", "15:00", "17:30"])
+                kick_off = rng.choice(["12:30", "15:00", "17:30"])
             else:
-                time = random.choice(["19:45", "20:00", "20:45"])
+                kick_off = rng.choice(["19:45", "20:00", "20:45"])
 
             matches.append(
                 {
                     "homeTeam": home,
                     "awayTeam": away,
                     "date": match_date.strftime("%Y-%m-%d"),
-                    "time": time,
+                    "time": kick_off,
                     "venue": f"{home} Stadium",
                 }
             )

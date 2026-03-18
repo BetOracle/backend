@@ -18,8 +18,8 @@ FootyOracle is an autonomous football prediction backend that:
 
 - **Frontend API (request/response contracts)**
   - `docs/FRONTEND_API.md`
-- **Deploy to Render (Postgres + gunicorn + hourly agent)**
-  - `docs/DEPLOY_RENDER.md`
+- **Deploy to Railway (recommended) or Render**
+  - See deployment section below
 - **Data sources & configuration (mock vs real, API keys)**
   - `docs/DATA_SOURCES.md`
 - **Local quickstart**
@@ -47,7 +47,43 @@ See `docs/DATA_SOURCES.md`.
 
 ## 🚀 Deployment
 
-See `docs/DEPLOY_RENDER.md`.
+### Railway (Recommended)
+
+**Advantages:** No timeout limits, native cron jobs, better for persistent agents.
+
+**1. Deploy API Service:**
+```bash
+# Railway CLI
+railway login
+railway init
+railway add --database postgres
+
+# Deploy
+git push railway main
+```
+
+**2. Add Cron Job:**
+- In Railway dashboard, add a new service
+- Select "Cron Job"
+- Command: `python railway_cron.py`
+- Schedule: `0 * * * *` (hourly)
+- Add same env vars as main service
+
+**3. Environment Variables:**
+```
+BLOCKCHAIN_ENABLED=True
+AGENT_WALLET=0x...
+PREDICTION_CONTRACT=0x...
+AGENT_ID=0x...
+AGENT_PRIVATE_KEY=0x...
+CELO_RPC_URL=https://forno.celo.org
+```
+
+### Alternative: Render
+
+See `docs/DEPLOY_RENDER.md` for Render-specific instructions.
+
+**Note:** GitHub Actions workflows removed (timeout limits). Use Railway Cron instead.
 
 ---
 
