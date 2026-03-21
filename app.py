@@ -7,7 +7,7 @@ import time
 from dotenv import load_dotenv
 
 from data_fetcher import DataFetcher
-from prediction_engine import PredictionEngine
+from prediction_engine import PredictionEngine, _NoValueBet
 from resolver import MatchResolver
 from models import Prediction, PredictionDatabase
 
@@ -172,6 +172,9 @@ def create_prediction():
             factors=prediction_result["factors"],
             timestamp=prediction_result["timestamp"],
             league=data["league"],
+            market_odds=prediction_result.get("marketOdds"),
+            true_probabilities=prediction_result.get("trueProbabilities"),
+            edge=prediction_result.get("edge"),
         )
 
         # Store in database
@@ -235,10 +238,15 @@ def create_prediction():
 
         return jsonify(response_data), 201
 
-    except RuntimeError as e:
-        # No value bet found — not an error, just no pick today
+    except _NoValueBet as e:
+        # No value edge found — return full analysis so frontend can still display it
         logger.info("No value bet: %s", e)
-        return jsonify({"success": False, "error": str(e), "code": "NO_VALUE_BET"}), 200
+        return jsonify({
+            "success": False,
+            "code": "NO_VALUE_BET",
+            "error": str(e),
+            **e.analysis,
+        }), 200
 
     except Exception as e:
         logger.error("Error in create_prediction: %s", e)

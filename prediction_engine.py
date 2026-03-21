@@ -22,6 +22,14 @@ from data_fetcher import DataFetcher
 
 logger = logging.getLogger(__name__)
 
+
+class _NoValueBet(RuntimeError):
+    """Raised when no value edge is found. Carries the full analysis payload."""
+    def __init__(self, message: str, analysis: dict):
+        super().__init__(message)
+        self.analysis = analysis
+
+
 # Minimum edge over market to surface a prediction
 MIN_EDGE = float(os.getenv("MIN_EDGE", "0.08"))
 
@@ -103,25 +111,37 @@ class PredictionEngine:
         if market_odds:
             value_bet = self.find_value(true_probs, market_odds)
 
-        if value_bet is None:
-            if self.debug:
-                logger.debug(
-                    "No value found for %s vs %s | probs=%s | odds=%s",
-                    home_team,
-                    away_team,
-                    true_probs,
-                    market_odds,
-                )
-            raise RuntimeError(
-                f"No value edge >= {MIN_EDGE:.0%} found for {home_team} vs {away_team}"
-            )
-
-        # --- Step 4: Build outcome label ---
+        # --- Step 4: Build base analysis (always returned) ---
         outcome_label_map = {
             "home_win": "HOME_WIN",
             "draw": "DRAW",
             "away_win": "AWAY_WIN",
         }
+
+        result = {
+            "matchId": match_id,
+            "marketOdds": market_odds,
+            "trueProbabilities": {k: round(v, 3) for k, v in true_probs.items()},
+            "factors": factors,
+            "timestamp": int(datetime.now().timestamp()),
+            "hasValueBet": value_bet is not None,
+        }
+
+        if value_bet is None:
+            logger.debug(
+                "No value found for %s vs %s | probs=%s | odds=%s",
+                home_team, away_team, true_probs, market_odds,
+            )
+            result.update({
+                "prediction": None,
+                "confidence": None,
+                "edge": None,
+            })
+            raise _NoValueBet(
+                f"No value edge >= {MIN_EDGE:.0%} found for {home_team} vs {away_team}",
+                result,
+            )
+
         prediction = outcome_label_map[value_bet["outcome"]]
         confidence = round(value_bet["our_prob"], 2)
         edge = round(value_bet["edge"], 3)
@@ -129,23 +149,15 @@ class PredictionEngine:
         if self.debug:
             logger.debug(
                 "VALUE BET: %s vs %s → %s (conf=%.1f%%, edge=%.1f%%)",
-                home_team,
-                away_team,
-                prediction,
-                confidence * 100,
-                edge * 100,
+                home_team, away_team, prediction, confidence * 100, edge * 100,
             )
 
-        return {
-            "matchId": match_id,
+        result.update({
             "prediction": prediction,
             "confidence": confidence,
             "edge": edge,
-            "marketOdds": market_odds,
-            "trueProbabilities": {k: round(v, 3) for k, v in true_probs.items()},
-            "factors": factors,
-            "timestamp": int(datetime.now().timestamp()),
-        }
+        })
+        return result
 
     def find_value(self, true_probs: dict, market_odds: dict) -> Optional[dict]:
         """

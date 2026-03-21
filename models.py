@@ -19,6 +19,9 @@ class Prediction:
         timestamp: int,
         prediction_id: str = None,
         league: str = None,
+        market_odds: dict = None,
+        true_probabilities: dict = None,
+        edge: float = None,
     ):
         self.prediction_id = prediction_id or self.generate_prediction_id()
         self.match_id = match_id
@@ -26,6 +29,9 @@ class Prediction:
         self.confidence = confidence
         self.factors = factors
         self.timestamp = timestamp
+        self.market_odds = market_odds
+        self.true_probabilities = true_probabilities
+        self.edge = edge
         # Derive league from match_id prefix if not supplied (e.g. "EPL-ARS-CHE-...")
         self.league = league or (match_id.split("-")[0] if match_id else "")
 
@@ -43,6 +49,9 @@ class Prediction:
             "league": self.league,
             "prediction": self.predicted_outcome,
             "confidence": self.confidence,
+            "edge": self.edge,
+            "marketOdds": self.market_odds,
+            "trueProbabilities": self.true_probabilities,
             "factors": self.factors,
             "timestamp": self.timestamp,
             "resolved": self.resolved,
@@ -122,7 +131,10 @@ class PredictionDatabase:
                     league TEXT NOT NULL DEFAULT '',
                     predicted_outcome TEXT NOT NULL,
                     confidence DOUBLE PRECISION NOT NULL,
+                    edge DOUBLE PRECISION,
                     factors_json JSONB NOT NULL,
+                    market_odds_json JSONB,
+                    true_probabilities_json JSONB,
                     timestamp BIGINT NOT NULL,
                     resolved BOOLEAN NOT NULL DEFAULT FALSE,
                     actual_outcome TEXT,
@@ -131,20 +143,26 @@ class PredictionDatabase:
                 )
                 """
             )
-            # Add league column to existing tables that predate this schema
-            cur.execute(
-                """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='predictions' AND column_name='league'
-                    ) THEN
-                        ALTER TABLE predictions ADD COLUMN league TEXT NOT NULL DEFAULT '';
-                    END IF;
-                END$$;
-                """
-            )
+            # Migrations for existing tables
+            for col, defn in [
+                ("league", "TEXT NOT NULL DEFAULT ''"),
+                ("edge", "DOUBLE PRECISION"),
+                ("market_odds_json", "JSONB"),
+                ("true_probabilities_json", "JSONB"),
+            ]:
+                cur.execute(
+                    f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name='predictions' AND column_name='{col}'
+                        ) THEN
+                            ALTER TABLE predictions ADD COLUMN {col} {defn};
+                        END IF;
+                    END$$;
+                    """
+                )
             try:
                 cur.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_match_id ON predictions(match_id)"
@@ -171,6 +189,9 @@ class PredictionDatabase:
             timestamp=row["timestamp"],
             prediction_id=row["prediction_id"],
             league=row.get("league", ""),
+            market_odds=row.get("market_odds_json"),
+            true_probabilities=row.get("true_probabilities_json"),
+            edge=row.get("edge"),
         )
         pred.resolved = bool(row["resolved"])
         pred.actual_outcome = row["actual_outcome"]
@@ -191,15 +212,18 @@ class PredictionDatabase:
                 """
                 INSERT INTO predictions (
                     prediction_id, match_id, league, predicted_outcome, confidence,
-                    factors_json, timestamp, resolved, actual_outcome, correct,
-                    resolution_timestamp
-                ) VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                    edge, factors_json, market_odds_json, true_probabilities_json,
+                    timestamp, resolved, actual_outcome, correct, resolution_timestamp
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s)
                 ON CONFLICT (match_id) DO UPDATE SET
-                    predicted_outcome = EXCLUDED.predicted_outcome,
-                    confidence        = EXCLUDED.confidence,
-                    factors_json      = EXCLUDED.factors_json,
-                    timestamp         = EXCLUDED.timestamp,
-                    league            = EXCLUDED.league
+                    predicted_outcome       = EXCLUDED.predicted_outcome,
+                    confidence              = EXCLUDED.confidence,
+                    edge                    = EXCLUDED.edge,
+                    factors_json            = EXCLUDED.factors_json,
+                    market_odds_json        = EXCLUDED.market_odds_json,
+                    true_probabilities_json = EXCLUDED.true_probabilities_json,
+                    timestamp               = EXCLUDED.timestamp,
+                    league                  = EXCLUDED.league
                 WHERE predictions.resolved = FALSE
                 RETURNING prediction_id
                 """,
@@ -209,7 +233,10 @@ class PredictionDatabase:
                     prediction.league or "",
                     prediction.predicted_outcome,
                     float(prediction.confidence),
+                    float(prediction.edge) if prediction.edge is not None else None,
                     json.dumps(prediction.factors),
+                    json.dumps(prediction.market_odds) if prediction.market_odds else None,
+                    json.dumps(prediction.true_probabilities) if prediction.true_probabilities else None,
                     int(prediction.timestamp),
                     bool(prediction.resolved),
                     prediction.actual_outcome,
