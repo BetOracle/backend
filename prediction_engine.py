@@ -22,10 +22,8 @@ from data_fetcher import DataFetcher
 
 logger = logging.getLogger(__name__)
 
-# Minimum edge over market to surface a prediction (PRD: 15%)
-MIN_EDGE = float(os.getenv("MIN_EDGE", "0.15"))
-# Minimum model confidence to surface a prediction (PRD: 60%)
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.60"))
+# Minimum edge over market to surface a prediction
+MIN_EDGE = float(os.getenv("MIN_EDGE", "0.08"))
 
 
 class PredictionEngine:
@@ -70,6 +68,7 @@ class PredictionEngine:
         away_team: str,
         league: str,
         match_id: str = None,
+        market_odds: dict = None,
     ) -> dict:
         """
         Generate prediction for a match.
@@ -95,8 +94,9 @@ class PredictionEngine:
         # --- Step 1: Calculate true probabilities from our model ---
         true_probs, factors = self._calculate_probabilities(home_team, away_team, league)
 
-        # --- Step 2: Fetch market odds ---
-        market_odds = self.data_fetcher.get_market_odds(home_team, away_team, league)
+        # --- Step 2: Use provided odds or fetch from AI ---
+        if not market_odds:
+            market_odds = self.data_fetcher.get_market_odds(home_team, away_team, league)
 
         # --- Step 3: Find value bet (if any) ---
         value_bet = None
@@ -189,15 +189,14 @@ class PredictionEngine:
             market_prob = market_probs.get(outcome, 0)
             edge = our_prob - market_prob
 
-            if edge >= MIN_EDGE and our_prob >= MIN_CONFIDENCE:
-                if edge > best_edge:
-                    best_edge = edge
-                    best_bet = {
-                        "outcome": outcome,
-                        "our_prob": our_prob,
-                        "market_prob": round(market_prob, 3),
-                        "edge": edge,
-                    }
+            if edge >= MIN_EDGE and edge > best_edge:
+                best_edge = edge
+                best_bet = {
+                    "outcome": outcome,
+                    "our_prob": our_prob,
+                    "market_prob": round(market_prob, 3),
+                    "edge": edge,
+                }
 
         return best_bet
 

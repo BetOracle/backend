@@ -722,26 +722,35 @@ class DataFetcher:
         # Try AI enrichment first
         if self.ai_enrichment_enabled and self.ai_enricher:
             try:
-                insights = self.ai_enricher.get_market_insights(home_team, away_team, league)
-                
+                # Pull form + H2H from cache (already fetched earlier in pipeline)
+                home_form = self.get_team_form(home_team, league)
+                away_form = self.get_team_form(away_team, league)
+                home_pos = self.get_table_position(home_team, league)
+                away_pos = self.get_table_position(away_team, league)
+                h2h = self.get_h2h(home_team, away_team, league)
+
+                insights = self.ai_enricher.get_market_insights(
+                    home_team, away_team, league,
+                    home_form=home_form,
+                    away_form=away_form,
+                    home_position=home_pos,
+                    away_position=away_pos,
+                    h2h=h2h,
+                )
+
                 if insights:
-                    # Convert probabilities to decimal odds (odds = 1 / prob)
-                    home_prob = insights.get("home_win_prob", 0.33)
-                    draw_prob = insights.get("draw_prob", 0.33)
-                    away_prob = insights.get("away_win_prob", 0.33)
-                    
-                    # Ensure minimum probability to avoid extreme odds
-                    min_prob = 0.05
-                    home_prob = max(home_prob, min_prob)
-                    draw_prob = max(draw_prob, min_prob)
-                    away_prob = max(away_prob, min_prob)
-                    
-                    # Normalize to sum to 1
-                    total = home_prob + draw_prob + away_prob
-                    home_prob /= total
-                    draw_prob /= total
-                    away_prob /= total
-                    
+                    # Convert probabilities to decimal odds with bookmaker margin (~5%)
+                    home_prob = max(insights.get("home_win_prob", 0.33), 0.05)
+                    draw_prob = max(insights.get("draw_prob", 0.33), 0.05)
+                    away_prob = max(insights.get("away_win_prob", 0.33), 0.05)
+
+                    # Normalise fair probs then apply 105% overround (typical bookmaker margin)
+                    total_fair = home_prob + draw_prob + away_prob
+                    margin = 1.05
+                    home_prob = (home_prob / total_fair) * margin
+                    draw_prob = (draw_prob / total_fair) * margin
+                    away_prob = (away_prob / total_fair) * margin
+
                     odds = {
                         "home": round(1.0 / home_prob, 2),
                         "draw": round(1.0 / draw_prob, 2),
@@ -749,10 +758,10 @@ class DataFetcher:
                         "source": "ai",
                         "confidence": insights.get("confidence", "medium"),
                     }
-                    
+
                     logger.info(f"AI market odds for {home_team} vs {away_team}: {odds}")
                     return odds
-                    
+
             except Exception as e:
                 logger.warning(f"AI market odds failed: {e}")
 

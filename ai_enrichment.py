@@ -296,43 +296,84 @@ Focus on observable patterns from the form data provided.
             },
         )
 
-    def get_market_insights(
-        self, home_team: str, away_team: str, league: str
-    ) -> Optional[Dict]:
-        """
-        Get AI-generated market insights (replaces odds API for edge detection).
-        
-        Returns estimated probabilities based on AI analysis rather than market odds.
-        """
-        if self.mock_mode or (not self._claude_client and not self._openai_client):
-            return None
+    def _build_market_prompt(
+        self,
+        home_team: str,
+        away_team: str,
+        league: str,
+        home_form: List[str],
+        away_form: List[str],
+        home_position: int,
+        away_position: int,
+        h2h: List[str],
+    ) -> str:
+        form_section = ""
+        if home_form or away_form:
+            n = len(home_form or away_form or [])
+            home_str = '-'.join(home_form) if home_form else 'unknown'
+            away_str = '-'.join(away_form) if away_form else 'unknown'
+            form_section = f"\nCURRENT FORM (last {n} matches, most recent last):\n- {home_team}: {home_str}\n- {away_team}: {away_str}\n"
 
-        prompt = f"""Analyze the expected probabilities for {home_team} vs {away_team} in {league}.
+        position_section = ""
+        if home_position and away_position:
+            position_section = f"\nLEAGUE TABLE POSITION (out of 20):\n- {home_team}: {home_position}th\n- {away_team}: {away_position}th\n"
 
-Based on typical performance patterns, historical data, and matchup dynamics,
-estimate fair probabilities (not bookmaker odds, but true win chances).
+        h2h_section = ""
+        if h2h:
+            hw, aw, dr = h2h.count("HOME"), h2h.count("AWAY"), h2h.count("DRAW")
+            h2h_section = f"\nHEAD-TO-HEAD (last {len(h2h)} meetings): {home_team} won {hw}, {away_team} won {aw}, {dr} draws\n"
 
-Respond with ONLY this JSON:
+        return f"""You are a football odds compiler. Estimate fair win probabilities for this match based on the data below.
+Weight CURRENT FORM heavily — recent results matter more than historical reputation.
+
+MATCH: {home_team} (home) vs {away_team} (away)
+LEAGUE: {league}
+{form_section}{position_section}{h2h_section}
+Output ONLY this JSON (probabilities must sum to 1.0):
 {{
     "home_win_prob": 0.XX,
     "draw_prob": 0.XX,
     "away_win_prob": 0.XX,
     "confidence": "high" | "medium" | "low",
-    "reasoning": "Brief explanation of the probability estimate"
+    "reasoning": "One sentence citing the key factor driving these probabilities"
 }}
-
-Probabilities must sum to approximately 1.0.
 """
+
+    def _extract_json(self, response: str) -> str:
+        if JSON_CODE_BLOCK_START in response:
+            return response.split(JSON_CODE_BLOCK_START)[1].split(CODE_BLOCK_START)[0].strip()
+        if CODE_BLOCK_START in response:
+            return response.split(CODE_BLOCK_START)[1].split(CODE_BLOCK_START)[0].strip()
+        return response
+
+    def get_market_insights(
+        self,
+        home_team: str,
+        away_team: str,
+        league: str,
+        home_form: List[str] = None,
+        away_form: List[str] = None,
+        home_position: int = None,
+        away_position: int = None,
+        h2h: List[str] = None,
+    ) -> Optional[Dict]:
+        """
+        Get AI-generated market insights using real form and H2H data.
+
+        Returns fair win probabilities (caller applies bookmaker margin).
+        """
+        if self.mock_mode or (not self._claude_client and not self._openai_client):
+            return None
+
+        prompt = self._build_market_prompt(
+            home_team, away_team, league,
+            home_form or [], away_form or [],
+            home_position, away_position, h2h or [],
+        )
 
         try:
             response = self._call_llm(prompt)
-            json_str = response
-            if JSON_CODE_BLOCK_START in response:
-                json_str = response.split(JSON_CODE_BLOCK_START)[1].split(CODE_BLOCK_START)[0].strip()
-            elif CODE_BLOCK_START in response:
-                json_str = response.split(CODE_BLOCK_START)[1].split(CODE_BLOCK_START)[0].strip()
-            
-            return json.loads(json_str)
+            return json.loads(self._extract_json(response))
         except Exception as e:
             logger.error(f"Market insights failed: {e}")
             return None

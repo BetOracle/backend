@@ -161,6 +161,7 @@ def create_prediction():
             away_team=data["awayTeam"],
             league=data["league"],
             match_id=match_id,
+            market_odds=data.get("marketOdds"),
         )
 
         # Create prediction object
