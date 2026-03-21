@@ -297,9 +297,9 @@ class PredictionEngine:
     # =========================================================================
 
     def _score_form(self, home_team: str, away_team: str, league: str) -> float:
-        """Recent form — weighted points (W=3, D=1, L=0) over last 5 games."""
-        home_form = self.data_fetcher.get_team_form(home_team, league)
-        away_form = self.data_fetcher.get_team_form(away_team, league)
+        """Recent form — weighted points (W=3, D=1, L=0) over last 5 home/away games."""
+        home_form = self.data_fetcher.get_team_form(home_team, league, venue="HOME")
+        away_form = self.data_fetcher.get_team_form(away_team, league, venue="AWAY")
 
         def points(form):
             return sum(3 if r == "W" else 1 if r == "D" else 0 for r in form)

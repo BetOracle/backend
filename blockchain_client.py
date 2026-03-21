@@ -286,10 +286,14 @@ class BlockchainClient:
             match_id = self.generate_match_id(league, home_team, away_team, str(match_date))
             prediction_id = self.generate_prediction_id(match_id, timestamp)
             
+            # Convert hex strings to bytes32 for ABI compatibility
+            match_id_bytes = bytes.fromhex(match_id.lstrip("0x").zfill(64))
+            prediction_id_bytes = bytes.fromhex(prediction_id.lstrip("0x").zfill(64))
+
             # Build transaction
             tx = self.agent_wallet.functions.submitPrediction(
-                match_id,  # _predictionId (bytes32) - actually matchId in contract
-                match_id,  # _matchId (bytes32)
+                prediction_id_bytes,  # _predictionId (bytes32)
+                match_id_bytes,       # _matchId (bytes32)
                 home_team,
                 away_team,
                 league,

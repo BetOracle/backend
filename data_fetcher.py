@@ -248,6 +248,10 @@ class DataFetcher:
     def _parse_h2h_results(
         self, matches: List[Dict], home_id: int, away_id: int, last_n: int
     ) -> List[str]:
+        """
+        Returns results from the perspective of home_id (the designated home team).
+        HOME = home_id won, AWAY = away_id won, DRAW = draw.
+        """
         def is_between_teams(match_home_id: int, match_away_id: int) -> bool:
             return (match_home_id == home_id and match_away_id == away_id) or (
                 match_home_id == away_id and match_away_id == home_id
@@ -263,12 +267,22 @@ class DataFetcher:
             home_score = match["score"]["fullTime"]["home"]
             away_score = match["score"]["fullTime"]["away"]
 
+            # Determine winner in terms of the actual match venue
             if home_score > away_score:
-                results.append("HOME")
+                venue_winner = match_home_id
             elif away_score > home_score:
-                results.append("AWAY")
+                venue_winner = match_away_id
             else:
                 results.append("DRAW")
+                if len(results) >= last_n:
+                    break
+                continue
+
+            # Map to HOME/AWAY from home_id's perspective
+            if venue_winner == home_id:
+                results.append("HOME")
+            else:
+                results.append("AWAY")
 
             if len(results) >= last_n:
                 break
@@ -283,12 +297,32 @@ class DataFetcher:
     # TEAM FORM
     # =========================================================================
 
-    def get_team_form(self, team_name: str, league: str, last_n: int = 5) -> List[str]:
-        """
-        Get team's recent form
+    def _matches_venue_filter(self, team_name: str, home_team_name: str, venue: str) -> bool:
+        """Return True if the match should be included given the venue filter."""
+        if venue is None:
+            return True
+        is_home = (home_team_name == team_name)
+        return is_home if venue == "HOME" else not is_home
 
-        Source: football-data.org
-        Fallback: Mock data
+    def _parse_form_from_matches(self, matches: List[Dict], team_name: str, venue: str, last_n: int) -> List[str]:
+        form = []
+        for match in matches:
+            home_team = match["homeTeam"]["name"]
+            if not self._matches_venue_filter(team_name, home_team, venue):
+                continue
+            home_score = match["score"]["fullTime"]["home"]
+            away_score = match["score"]["fullTime"]["away"]
+            form.append(self._outcome_from_match_score(team_name, home_team, home_score, away_score))
+            if len(form) >= last_n:
+                break
+        return form
+
+    def get_team_form(self, team_name: str, league: str, last_n: int = 5, venue: str = None) -> List[str]:
+        """
+        Get team's recent form, optionally filtered by venue.
+
+        Args:
+            venue: "HOME" for home matches only, "AWAY" for away only, None for all.
 
         Returns:
             ['W', 'L', 'D', 'W', 'W']
@@ -307,27 +341,17 @@ class DataFetcher:
                 self._strict_fail(f"Could not resolve team id for '{team_name}'")
                 return self.mock.get_team_form(team_name, last_n)
 
-            url = f"{self.football_api_url}/teams/{team_id}/matches?status=FINISHED&limit={last_n}"
+            fetch_limit = last_n * 3 if venue else last_n
+            cache_key = f"form_{team_id}_{venue or 'all'}"
+            url = f"{self.football_api_url}/teams/{team_id}/matches?status=FINISHED&limit={fetch_limit}"
             headers = {"X-Auth-Token": self.football_api_key}
-            data = self._make_request(url, headers, f"form_{team_id}")
+            data = self._make_request(url, headers, cache_key)
 
             if not data or "matches" not in data:
                 self._strict_fail("No matches returned for team form")
                 return self.mock.get_team_form(team_name, last_n)
 
-            form = []
-            for match in data["matches"][:last_n]:
-                home_team = match["homeTeam"]["name"]
-                home_score = match["score"]["fullTime"]["home"]
-                away_score = match["score"]["fullTime"]["away"]
-
-                form.append(
-                    self._outcome_from_match_score(
-                        team_name, home_team, home_score, away_score
-                    )
-                )
-
-            return form[:last_n]
+            return self._parse_form_from_matches(data["matches"], team_name, venue, last_n)
 
         except Exception as e:
             if not self.strict_real_data:
