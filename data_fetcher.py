@@ -112,13 +112,16 @@ class DataFetcher:
             return 0
         return len(a_tokens & b_tokens)
 
-    def _get_cached(self, cache_key: Optional[str]) -> Optional[Dict]:
-        if not cache_key:
-            return None
-        if cache_key not in self.cache:
+    # TTLs for data that changes at different rates
+    CACHE_TTL_LIVE = 300          # 5 min  — form, standings (changes match-to-match)
+    CACHE_TTL_DAILY = 86400       # 24 hr  — H2H history, AI odds (stable within a day)
+
+    def _get_cached(self, cache_key: Optional[str], ttl: int = None) -> Optional[Dict]:
+        if not cache_key or cache_key not in self.cache:
             return None
         cached_time, cached_data = self.cache[cache_key]
-        if (datetime.now() - cached_time).seconds < self.cache_duration:
+        effective_ttl = ttl if ttl is not None else self.cache_duration
+        if (datetime.now() - cached_time).total_seconds() < effective_ttl:
             return cached_data
         return None
 
@@ -464,6 +467,12 @@ class DataFetcher:
             return self.mock.get_h2h(home_team, away_team, last_n)
 
         try:
+            # H2H history is stable within a day — use daily cache
+            h2h_cache_key = f"h2h_{home_team}_{away_team}_{league}"
+            cached_h2h = self._get_cached(h2h_cache_key, ttl=self.CACHE_TTL_DAILY)
+            if cached_h2h:
+                return cached_h2h
+
             league_id = self._get_league_id(league, "football_data")
             home_id = self._get_team_id_football_data(home_team, league_id)
             away_id = self._get_team_id_football_data(away_team, league_id)
@@ -480,11 +489,10 @@ class DataFetcher:
 
             h2h_results = self._parse_h2h_results(data["matches"], home_id, away_id, last_n)
 
-            return (
-                h2h_results[:last_n]
-                if h2h_results
-                else self.mock.get_h2h(home_team, away_team, last_n)
-            )
+            if h2h_results:
+                self._set_cache(h2h_cache_key, h2h_results[:last_n])
+                return h2h_results[:last_n]
+            return self.mock.get_h2h(home_team, away_team, last_n)
 
         except Exception as e:
             if not self.strict_real_data:
@@ -743,10 +751,15 @@ class DataFetcher:
         if self.mock_mode:
             return self.mock.get_market_odds(home_team, away_team, league)
 
-        # Try AI enrichment first
+        # AI odds are stable within a day — check cache first
+        odds_cache_key = f"market_odds_{home_team}_{away_team}_{league}"
+        cached = self._get_cached(odds_cache_key, ttl=self.CACHE_TTL_DAILY)
+        if cached:
+            return cached
+
+        # Try AI enrichment
         if self.ai_enrichment_enabled and self.ai_enricher:
             try:
-                # Pull form + H2H from cache (already fetched earlier in pipeline)
                 home_form = self.get_team_form(home_team, league)
                 away_form = self.get_team_form(away_team, league)
                 home_pos = self.get_table_position(home_team, league)
@@ -763,12 +776,10 @@ class DataFetcher:
                 )
 
                 if insights:
-                    # Convert probabilities to decimal odds with bookmaker margin (~5%)
                     home_prob = max(insights.get("home_win_prob", 0.33), 0.05)
                     draw_prob = max(insights.get("draw_prob", 0.33), 0.05)
                     away_prob = max(insights.get("away_win_prob", 0.33), 0.05)
 
-                    # Normalise fair probs then apply 105% overround (typical bookmaker margin)
                     total_fair = home_prob + draw_prob + away_prob
                     margin = 1.05
                     home_prob = (home_prob / total_fair) * margin
@@ -783,6 +794,7 @@ class DataFetcher:
                         "confidence": insights.get("confidence", "medium"),
                     }
 
+                    self._set_cache(odds_cache_key, odds)
                     logger.info(f"AI market odds for {home_team} vs {away_team}: {odds}")
                     return odds
 
