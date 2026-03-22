@@ -41,9 +41,21 @@ A prediction returned by the API includes:
 ```json
 {
   "predictionId": "offchain-1700000000",
-  "matchId": "EPL-123456",
+  "matchId": "EPL-538093-TOT-NOT-2026-03-22",
+  "league": "EPL",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
+  "edge": 0.18,
+  "marketOdds": {
+    "home": 2.5,
+    "draw": 3.2,
+    "away": 2.8
+  },
+  "trueProbabilities": {
+    "home_win": 0.42,
+    "draw": 0.28,
+    "away_win": 0.30
+  },
   "factors": {
     "formScore": 0.7,
     "injuryImpact": -0.1,
@@ -60,9 +72,10 @@ A prediction returned by the API includes:
 
 Notes:
 - `confidence` is a 0..1 float.
+- `edge`, `marketOdds`, `trueProbabilities` are populated when AI enrichment is enabled; may be `null` otherwise.
 - `resolved` is boolean.
-- `actualOutcome`, `correct`, `resolutionTimestamp` are present when resolved.
-- `matchId` is stable and AI-resolvable. Preferred format when `fixtureId` is known:
+- `actualOutcome`, `correct`, `resolutionTimestamp` are populated after resolution.
+- `matchId` preferred format when `fixtureId` is known:
   - `{league}-{fixtureId}-{homeCode}-{awayCode}-{YYYY-MM-DD}`
   - Example: `EPL-538093-TOT-NOT-2026-03-22`
   - `homeCode` / `awayCode` are normalized 3-letter codes (common prefixes like `FC` are ignored).
@@ -258,13 +271,21 @@ Notes:
 ### Create a prediction (agent-triggered / precomputed)
 `POST /api/predict`
 
+The same `POST /api/predict` endpoint handles both paths. The server detects agent payloads by the presence of `matchId + prediction + confidence + factors + timestamp` and stores them directly (skipping the engine). `homeTeam`, `awayTeam`, and `league` **must** be included so the prediction is stored correctly and appears in per-league queries.
+
 Request (agent payload):
 
 ```json
 {
-  "matchId": "EPL-123456",
+  "matchId": "EPL-538093-TOT-NOT-2026-03-22",
+  "homeTeam": "Tottenham Hotspur FC",
+  "awayTeam": "Nottingham Forest FC",
+  "league": "EPL",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
+  "edge": 0.18,
+  "marketOdds": { "home": 2.5, "draw": 3.2, "away": 2.8 },
+  "trueProbabilities": { "home_win": 0.42, "draw": 0.28, "away_win": 0.30 },
   "factors": {
     "formScore": 0.7,
     "injuryImpact": -0.1,
@@ -275,7 +296,7 @@ Request (agent payload):
 }
 ```
 
-Response: same shape as above (may include `blockchain` field if on-chain submission is enabled for this endpoint).
+Response: same shape as the frontend-triggered response (blockchain field included if on-chain submission is enabled).
 
 ---
 

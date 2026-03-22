@@ -280,6 +280,11 @@ class FootyOracleAgent:
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
+                # Build payload — include homeTeam/awayTeam/league so that
+                # _validate_prediction_request passes AND so the precomputed
+                # shortcut in create_prediction can also use them (e.g. blockchain).
+                home_team = (match or {}).get("homeTeam", "")
+                away_team = (match or {}).get("awayTeam", "")
                 response = requests.post(
                     f"{self.backend_url}/api/predict",
                     json={
@@ -288,6 +293,9 @@ class FootyOracleAgent:
                         "confidence": prediction_data["confidence"],
                         "factors": prediction_data["factors"],
                         "timestamp": prediction_data["timestamp"],
+                        "homeTeam": home_team,
+                        "awayTeam": away_team,
+                        "league": resolved_league,
                     },
                     timeout=10,
                 )

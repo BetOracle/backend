@@ -102,6 +102,10 @@ def _handle_precomputed_prediction(data):
         confidence=data["confidence"],
         factors=data["factors"],
         timestamp=data["timestamp"],
+        league=data.get("league", ""),
+        edge=data.get("edge"),
+        market_odds=data.get("marketOdds"),
+        true_probabilities=data.get("trueProbabilities"),
     )
     
     prediction_id = db.add_prediction(prediction)
@@ -271,12 +275,17 @@ def create_prediction():
     """
     try:
         data = request.get_json()
-        _validate_prediction_request(data)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "error": "Invalid JSON payload"}), 400
 
-        # Accept precomputed predictions (agent payload)
+        # Accept precomputed predictions (agent payload) — checked BEFORE the
+        # homeTeam/awayTeam/league validation so agent posts always succeed.
         if all(k in data for k in ["matchId", "prediction", "confidence", "factors", "timestamp"]):
             response_data = _handle_precomputed_prediction(data)
             return jsonify(response_data), 201
+
+        # For live engine requests, homeTeam / awayTeam / league are required.
+        _validate_prediction_request(data)
 
         # Generate prediction
         match_id = _generate_match_id(data)
