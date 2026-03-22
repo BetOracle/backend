@@ -117,6 +117,51 @@ def _handle_precomputed_prediction(data):
     }
 
 
+def _team_code(team_name: str) -> str:
+    if not team_name:
+        return "UNK"
+
+    import re
+
+    cleaned = re.sub(r"[^A-Za-z\s]", " ", str(team_name))
+    tokens = [t for t in cleaned.upper().split() if t]
+    stop = {
+        "FC",
+        "CF",
+        "SC",
+        "AC",
+        "AS",
+        "CD",
+        "CA",
+        "RC",
+        "UD",
+        "AFC",
+        "FK",
+        "SK",
+        "SV",
+        "BV",
+        "VFL",
+        "VFB",
+        "DE",
+        "LA",
+        "EL",
+        "LOS",
+        "LAS",
+    }
+
+    core = None
+    for t in tokens:
+        if t not in stop:
+            core = t
+            break
+    core = core or (tokens[0] if tokens else "UNK")
+
+    letters = re.sub(r"[^A-Z]", "", core)
+    if not letters:
+        return "UNK"
+    return letters[:3]
+
+
 def _generate_match_id(data):
     """Generate match ID from fixture or match data."""
     match_id = data.get("matchId")
@@ -135,8 +180,8 @@ def _generate_match_id(data):
         date_str = datetime.now().strftime("%Y-%m-%d")
 
     if home_team and away_team and league:
-        home_abbr = home_team[:3].upper()
-        away_abbr = away_team[:3].upper()
+        home_abbr = _team_code(home_team)
+        away_abbr = _team_code(away_team)
         if fixture_id is not None and str(fixture_id).isdigit():
             return f"{league}-{int(fixture_id)}-{home_abbr}-{away_abbr}-{date_str}"
         return f"{league}-{home_abbr}-{away_abbr}-{date_str}"
@@ -365,6 +410,84 @@ def get_prediction(prediction_id):
             return jsonify({"success": False, "error": "Prediction not found"}), 404
 
         return jsonify({"success": True, "prediction": prediction.to_dict()}), 200
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/admin/migrate-match-ids", methods=["POST"])
+def migrate_match_ids():
+    try:
+        data = request.get_json(silent=True) or {}
+        dry_run = bool(data.get("dryRun", True))
+        days_ahead = int(data.get("daysAhead", 14))
+        max_items = int(data.get("max", 200))
+
+        unresolved = db.get_unresolved_predictions()
+
+        import re
+
+        legacy = []
+        for p in unresolved:
+            if re.fullmatch(r"[A-Za-z]+-\d+", p.match_id or ""):
+                legacy.append(p)
+
+        legacy = legacy[: max(0, max_items)]
+
+        matches_by_league = {}
+        fixture_index = {}
+        for league in {p.league for p in legacy if p.league}:
+            try:
+                matches = _data_fetcher.get_league_matches(league=league, days_ahead=days_ahead)
+            except Exception:
+                matches = []
+            matches_by_league[league] = matches
+            for m in matches:
+                fid = m.get("fixtureId")
+                if isinstance(fid, int):
+                    fixture_index[(league, fid)] = m
+
+        updated = []
+        skipped = []
+        errors = []
+
+        for p in legacy:
+            try:
+                league, fid_str = p.match_id.split("-", 1)
+                fid = int(fid_str)
+                m = fixture_index.get((league, fid))
+                if not m:
+                    skipped.append({"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "fixture_not_found"})
+                    continue
+
+                new_match_id = f"{league}-{fid}-{_team_code(m.get('homeTeam', ''))}-{_team_code(m.get('awayTeam', ''))}-{m.get('date', '')}"
+                if not m.get("date"):
+                    skipped.append({"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "missing_date"})
+                    continue
+
+                if dry_run:
+                    updated.append({"predictionId": p.prediction_id, "from": p.match_id, "to": new_match_id, "dryRun": True})
+                    continue
+
+                ok = db.update_prediction_match_id(p.prediction_id, new_match_id)
+                if ok:
+                    updated.append({"predictionId": p.prediction_id, "from": p.match_id, "to": new_match_id, "dryRun": False})
+                else:
+                    skipped.append({"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "update_failed_or_conflict"})
+
+            except Exception as e:
+                errors.append({"predictionId": getattr(p, "prediction_id", None), "matchId": getattr(p, "match_id", None), "error": str(e)})
+
+        return jsonify({
+            "success": True,
+            "dryRun": dry_run,
+            "daysAhead": days_ahead,
+            "max": max_items,
+            "foundLegacy": len(legacy),
+            "updated": updated,
+            "skipped": skipped,
+            "errors": errors,
+        }), 200
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500

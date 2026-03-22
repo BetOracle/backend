@@ -350,6 +350,29 @@ class PredictionDatabase:
             conn.commit()
         return cur.rowcount > 0
 
+    def update_prediction_match_id(self, prediction_id: str, new_match_id: str) -> bool:
+        """Update match_id for an unresolved prediction. Returns True if updated."""
+        if not prediction_id or not new_match_id:
+            return False
+
+        with self._lock, self._connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    UPDATE predictions
+                    SET match_id = %s,
+                        league = COALESCE(NULLIF(league, ''), split_part(%s, '-', 1))
+                    WHERE prediction_id = %s AND resolved = FALSE
+                    """,
+                    (new_match_id, new_match_id, prediction_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            except psycopg.Error:
+                conn.rollback()
+                return False
+
     # =========================================================================
     # DELETE
     # =========================================================================

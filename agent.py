@@ -7,6 +7,7 @@ from prediction_engine import PredictionEngine
 from models import PredictionDatabase, Prediction
 import requests
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -193,8 +194,50 @@ class FootyOracleAgent:
     def _generate_match_id(self, match: dict, league: str) -> str:
         """Generate match ID from match data"""
 
-        home_abbr = match["homeTeam"][:3].upper()
-        away_abbr = match["awayTeam"][:3].upper()
+        def team_code(team_name: str) -> str:
+            if not team_name:
+                return "UNK"
+
+            cleaned = re.sub(r"[^A-Za-z\s]", " ", str(team_name))
+            tokens = [t for t in cleaned.upper().split() if t]
+            stop = {
+                "FC",
+                "CF",
+                "SC",
+                "AC",
+                "AS",
+                "CD",
+                "CA",
+                "RC",
+                "UD",
+                "AFC",
+                "FK",
+                "SK",
+                "SV",
+                "BV",
+                "VFL",
+                "VFB",
+                "DE",
+                "LA",
+                "EL",
+                "LOS",
+                "LAS",
+            }
+
+            core = None
+            for t in tokens:
+                if t not in stop:
+                    core = t
+                    break
+            core = core or (tokens[0] if tokens else "UNK")
+
+            letters = re.sub(r"[^A-Z]", "", core)
+            if not letters:
+                return "UNK"
+            return letters[:3]
+
+        home_abbr = team_code(match.get("homeTeam", ""))
+        away_abbr = team_code(match.get("awayTeam", ""))
         date_str = match["date"]
 
         fixture_id = match.get("fixtureId")

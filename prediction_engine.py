@@ -396,6 +396,50 @@ class PredictionEngine:
     def _generate_match_id(self, home_team: str, away_team: str, league: str) -> str:
         """Generate unique match ID from team names, league and current date."""
         date_str = datetime.now().strftime("%Y-%m-%d")
-        home_abbr = home_team[:3].upper()
-        away_abbr = away_team[:3].upper()
+        import re
+
+        def team_code(team_name: str) -> str:
+            if not team_name:
+                return "UNK"
+
+            cleaned = re.sub(r"[^A-Za-z\s]", " ", str(team_name))
+            tokens = [t for t in cleaned.upper().split() if t]
+            stop = {
+                "FC",
+                "CF",
+                "SC",
+                "AC",
+                "AS",
+                "CD",
+                "CA",
+                "RC",
+                "UD",
+                "AFC",
+                "FK",
+                "SK",
+                "SV",
+                "BV",
+                "VFL",
+                "VFB",
+                "DE",
+                "LA",
+                "EL",
+                "LOS",
+                "LAS",
+            }
+
+            core = None
+            for t in tokens:
+                if t not in stop:
+                    core = t
+                    break
+            core = core or (tokens[0] if tokens else "UNK")
+
+            letters = re.sub(r"[^A-Z]", "", core)
+            if not letters:
+                return "UNK"
+            return letters[:3]
+
+        home_abbr = team_code(home_team)
+        away_abbr = team_code(away_team)
         return f"{league}-{home_abbr}-{away_abbr}-{date_str}"
