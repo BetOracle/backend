@@ -285,6 +285,8 @@ class FootyOracleAgent:
                 # shortcut in create_prediction can also use them (e.g. blockchain).
                 home_team = (match or {}).get("homeTeam", "")
                 away_team = (match or {}).get("awayTeam", "")
+                match_date = (match or {}).get("date")
+                match_time = (match or {}).get("time")
                 response = requests.post(
                     f"{self.backend_url}/api/predict",
                     json={
@@ -296,6 +298,8 @@ class FootyOracleAgent:
                         "homeTeam": home_team,
                         "awayTeam": away_team,
                         "league": resolved_league,
+                        "date": match_date,
+                        "time": match_time,
                     },
                     timeout=10,
                 )

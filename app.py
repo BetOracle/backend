@@ -1,7 +1,7 @@
 import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import time
 from dotenv import load_dotenv
@@ -102,6 +102,8 @@ def _handle_precomputed_prediction(data):
         factors = {**factors, "homeTeam": data.get("homeTeam")}
     if data.get("awayTeam"):
         factors = {**factors, "awayTeam": data.get("awayTeam")}
+    if data.get("time"):
+        factors = {**factors, "time": data.get("time")}
     # If the agent didn't explicitly send a date, derive it from matchId when possible.
     if data.get("date"):
         factors = {**factors, "date": data.get("date")}
@@ -327,6 +329,8 @@ def create_prediction():
                 factors = {**factors, "awayTeam": data.get("awayTeam")}
             if data.get("date"):
                 factors = {**factors, "date": data.get("date")}
+            if data.get("time"):
+                factors = {**factors, "time": data.get("time")}
 
         # Create prediction object
         prediction = Prediction(
@@ -713,6 +717,15 @@ def _process_single_prediction(prediction, resolver, db):
         home_team = factors.get("homeTeam") or factors.get("home_team")
         away_team = factors.get("awayTeam") or factors.get("away_team")
         match_date = factors.get("date")
+        match_time = factors.get("time")
+
+        if match_date and match_time:
+            try:
+                kickoff = datetime.strptime(f"{match_date} {match_time}", "%Y-%m-%d %H:%M")
+                if datetime.now() < kickoff + timedelta(minutes=130):
+                    return {"type": "skipped", "reason": "not_finished_window"}
+            except Exception:
+                pass
 
         if home_team and away_team and match_date:
             actual_outcome = resolver.ai_resolver.get_ai_match_result(home_team, away_team, match_date)
@@ -748,6 +761,10 @@ def _process_predictions(unresolved, max_items, time_budget_seconds, resolver, d
     """Process all predictions within limits."""
     results = []
     errors = []
+    skipped = {
+        "not_finished_window": 0,
+        "no_result": 0,
+    }
     started = time.monotonic()
     processed = 0
     
@@ -761,10 +778,12 @@ def _process_predictions(unresolved, max_items, time_budget_seconds, resolver, d
             errors.append(result["data"])
         elif result["type"] == "success":
             results.append(result["data"])
-        
+        elif result["type"] == "skipped":
+            skipped[result.get("reason") or "no_result"] = skipped.get(result.get("reason") or "no_result", 0) + 1
+
         processed += 1
-    
-    return results, errors, processed
+
+    return results, errors, processed, skipped
 
 
 @app.route("/api/resolve/auto", methods=["POST"])
@@ -795,7 +814,7 @@ def auto_resolve():
         max_items, time_budget_seconds = _validate_resolution_params(data)
         
         # Process predictions
-        results, errors, processed = _process_predictions(
+        results, errors, processed, skipped = _process_predictions(
             unresolved, max_items, time_budget_seconds, resolver, db
         )
         
@@ -810,6 +829,7 @@ def auto_resolve():
             "remaining": remaining,
             "results": results,
             "errors": errors,
+            "skipped": skipped,
         }), 200
         
     except Exception as e:
