@@ -336,16 +336,32 @@ Response:
 {
   "success": true,
   "resolved": 0,
-  "processed": 0,
-  "remaining": 0,
+  "processed": 12,
+  "remaining": 8,
   "results": [],
   "errors": [],
   "skipped": {
-    "not_finished_window": 0,
-    "no_result": 0
+    "future_match_date": 4,
+    "not_finished_window": 3,
+    "no_result": 2,
+    "provider_status_scheduled": 0,
+    "provider_status_timed": 1,
+    "provider_status_in_play": 1,
+    "provider_status_paused": 0,
+    "provider_status_postponed": 0,
+    "provider_status_suspended": 0,
+    "provider_status_canceled": 0,
+    "provider_status_awarded": 0,
+    "provider_status_unknown": 0
   }
 }
 ```
+
+**Skip reasons explained:**
+- `future_match_date`: Match date is in the future (skipped without calling any provider)
+- `not_finished_window`: Match is within the 130-minute post-kickoff grace period
+- `no_result`: Match result could not be determined from AI or provider
+- `provider_status_*`: Match status from football-data.org provider (skipped unless status is `FINISHED`)
 
 ---
 

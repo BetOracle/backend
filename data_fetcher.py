@@ -140,7 +140,9 @@ class DataFetcher:
     def _request_once(self, url: str, headers: Dict) -> requests.Response:
         self._throttle_if_needed()
         self._last_request_time = time.monotonic()
-        return requests.get(url, headers=headers, timeout=10)
+        # Use a connect/read timeout tuple to avoid long SSL handshake stalls
+        # causing the resolver request to exceed the Gunicorn worker timeout.
+        return requests.get(url, headers=headers, timeout=(3.05, 10))
 
     def _backoff_seconds_from_response(self, response: requests.Response) -> float:
         retry_after = response.headers.get("Retry-After")

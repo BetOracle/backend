@@ -719,6 +719,24 @@ def _process_single_prediction(prediction, resolver, db):
         match_date = factors.get("date")
         match_time = factors.get("time")
 
+        # Cheap gating first: if the match is in the future, skip without calling any provider.
+        if match_date:
+            try:
+                match_day = datetime.strptime(match_date, "%Y-%m-%d").date()
+                if datetime.now().date() < match_day:
+                    return {"type": "skipped", "reason": "future_match_date"}
+            except Exception:
+                pass
+
+        # If kickoff time is known, also avoid premature checks until the match should be finished.
+        if match_date and match_time:
+            try:
+                kickoff = datetime.strptime(f"{match_date} {match_time}", "%Y-%m-%d %H:%M")
+                if datetime.now() < kickoff + timedelta(minutes=130):
+                    return {"type": "skipped", "reason": "not_finished_window"}
+            except Exception:
+                pass
+
         # If we have a fixtureId, use the authoritative provider status to decide whether
         # the match is truly finished. This avoids AI hallucination.
         fixture_id = factors.get("fixtureId")
@@ -747,14 +765,6 @@ def _process_single_prediction(prediction, resolver, db):
                                 "correct": is_correct,
                             },
                         }
-            except Exception:
-                pass
-
-        if match_date and match_time:
-            try:
-                kickoff = datetime.strptime(f"{match_date} {match_time}", "%Y-%m-%d %H:%M")
-                if datetime.now() < kickoff + timedelta(minutes=130):
-                    return {"type": "skipped", "reason": "not_finished_window"}
             except Exception:
                 pass
 
@@ -796,8 +806,18 @@ def _process_predictions(unresolved, max_items, time_budget_seconds, resolver, d
     results = []
     errors = []
     skipped = {
+        "future_match_date": 0,
         "not_finished_window": 0,
         "no_result": 0,
+        "provider_status_scheduled": 0,
+        "provider_status_timed": 0,
+        "provider_status_in_play": 0,
+        "provider_status_paused": 0,
+        "provider_status_postponed": 0,
+        "provider_status_suspended": 0,
+        "provider_status_canceled": 0,
+        "provider_status_awarded": 0,
+        "provider_status_unknown": 0,
     }
     started = time.monotonic()
     processed = 0
@@ -813,7 +833,14 @@ def _process_predictions(unresolved, max_items, time_budget_seconds, resolver, d
         elif result["type"] == "success":
             results.append(result["data"])
         elif result["type"] == "skipped":
-            skipped[result.get("reason") or "no_result"] = skipped.get(result.get("reason") or "no_result", 0) + 1
+            reason = result.get("reason") or "no_result"
+            if reason.startswith("provider_status_"):
+                # Ensure bucket exists even if provider adds a new status.
+                if reason not in skipped:
+                    skipped[reason] = 0
+                skipped[reason] += 1
+            else:
+                skipped[reason] = skipped.get(reason, 0) + 1
 
         processed += 1
 
