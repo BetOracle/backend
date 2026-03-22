@@ -101,6 +101,67 @@ class AIResolver:
         }
         return team_mapping.get(team_code.upper(), team_code)
     
+    def lookup_fixture_id(self, match_id: str) -> Optional[Dict[str, str]]:
+        """Use AI to lookup match details from fixture ID"""
+        try:
+            parts = match_id.split("-")
+            if len(parts) != 2 or not parts[1].isdigit():
+                return None
+                
+            league = parts[0]
+            fixture_id = parts[1]
+            
+            league_names = {
+                "EPL": "Premier League",
+                "LaLiga": "La Liga", 
+                "SerieA": "Serie A",
+                "Bundesliga": "Bundesliga",
+                "Ligue1": "Ligue 1"
+            }
+            
+            league_full = league_names.get(league, league)
+            
+            prompt = f"""Search for fixture ID {fixture_id} in {league_full}. 
+            
+Please find the match details and return in this exact format:
+home_team: [Team Name]
+away_team: [Team Name]  
+date: [YYYY-MM-DD]
+
+If you cannot find this specific fixture ID, return "NOT_FOUND"."""
+
+            response = self.client.messages.create(
+                model="claude-3-sonnet-20240229",
+                max_tokens=100,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            result = response.content[0].text.strip()
+            
+            if "NOT_FOUND" in result:
+                return None
+                
+            # Parse the response
+            details = {}
+            for line in result.split('\n'):
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    details[key.strip().lower()] = value.strip()
+            
+            if all(k in details for k in ['home_team', 'away_team', 'date']):
+                return {
+                    "homeTeam": details['home_team'],
+                    "awayTeam": details['away_team'],
+                    "date": details['date'],
+                    "league": league
+                }
+            
+        except Exception as e:
+            print(f"Error looking up fixture ID {match_id}: {e}")
+            
+        return None
+
     def get_match_info_from_fixture(self, league: str, fixture_id: str) -> Optional[Dict[str, str]]:
         """Get match info from fixture ID using data fetcher"""
         try:
@@ -187,9 +248,22 @@ Do not include scores, explanations, or any other text. Just return the result."
             
             return self.get_ai_match_result(home_team, away_team, match_date)
         
-        # Format 2: Fixture IDs (AI cannot handle these - fall back to data fetcher)
+        # Format 2: Fixture IDs (AI can now lookup and resolve these!)
         elif parsed.get("format") == "fixture":
-            print(f"Fixture ID format {match_id} - using data fetcher fallback")
+            print(f"Fixture ID format {match_id} - attempting AI lookup")
+            
+            # Use AI to lookup match details from fixture ID
+            match_details = self.lookup_fixture_id(match_id)
+            if match_details:
+                home_team = match_details.get("homeTeam", "")
+                away_team = match_details.get("awayTeam", "")
+                match_date = match_details.get("date", "")
+                
+                if all([home_team, away_team, match_date]):
+                    print(f"AI lookup successful: {home_team} vs {away_team} on {match_date}")
+                    return self.get_ai_match_result(home_team, away_team, match_date)
+            
+            print(f"AI lookup failed for {match_id} - falling back to data fetcher")
             return None  # Let resolver fall back to data fetcher
         
         return None
