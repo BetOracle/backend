@@ -728,7 +728,13 @@ def _process_single_prediction(prediction, resolver, db):
                 pass
 
         if home_team and away_team and match_date:
-            actual_outcome = resolver.ai_resolver.get_ai_match_result(home_team, away_team, match_date)
+            actual_outcome = resolver.ai_resolver.get_ai_match_result(
+                home_team, away_team, match_date
+            )
+            # If AI can't find the result (or is unavailable), fall back to fixtureId-based
+            # resolution via football-data.org.
+            if not actual_outcome:
+                actual_outcome = resolver.data_fetcher.get_match_result(prediction.match_id)
         else:
             actual_outcome = resolver.get_match_result(prediction.match_id)
     except Exception as e:
