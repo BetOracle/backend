@@ -177,7 +177,7 @@ class LoadTester:
             teams = self.teams[league]
             used_teams = set()
 
-            for i in range(predictions_per_league):
+            for _ in range(predictions_per_league):
                 # Pick teams that haven't played yet
                 available = [t for t in teams if t not in used_teams]
                 if len(available) < 2:
@@ -201,7 +201,7 @@ class LoadTester:
                         f"   ✅ {pred['match']}: {pred['prediction']} ({pred['confidence']:.0%})"
                     )
                 else:
-                    print(f"   ❌ Failed to create prediction")
+                    print("   ❌ Failed to create prediction")
 
         duration = time.time() - start_time
         self._print_summary(duration, "Light")
@@ -222,7 +222,7 @@ class LoadTester:
             teams = self.teams[league]
 
             count = 0
-            for i in range(predictions_per_league):
+            for _ in range(predictions_per_league):
                 import random
 
                 home = random.choice(teams)
@@ -258,7 +258,7 @@ class LoadTester:
             teams = self.teams[league]
 
             count = 0
-            for i in range(predictions_per_league):
+            for _ in range(predictions_per_league):
                 import random
 
                 home = random.choice(teams)
@@ -340,7 +340,7 @@ class LoadTester:
                 print(f"📦 Stored in API: {stored}")
 
                 if stored == created:
-                    print(f"✅ All predictions successfully stored!")
+                    print("✅ All predictions successfully stored!")
                 else:
                     print(f"⚠️  Mismatch: {created - stored} predictions missing")
 
@@ -389,12 +389,12 @@ def main():
     try:
         response = requests.get(f"{tester.base_url}/health", timeout=2)
         if response.status_code != 200:
-            print(f"\n❌ API server not responding correctly")
-            print(f"   Make sure server is running: python app.py")
+            print("\n❌ API server not responding correctly")
+            print("   Make sure server is running: python app.py")
             return
-    except:
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.RequestException):
         print(f"\n❌ Cannot connect to {tester.base_url}")
-        print(f"   Make sure server is running: python app.py")
+        print("   Make sure server is running: python app.py")
         return
 
     print(f"\n✅ Connected to API at {tester.base_url}")

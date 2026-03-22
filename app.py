@@ -83,6 +83,108 @@ def get_upcoming_matches():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def _validate_prediction_request(data):
+    """Validate the prediction request data."""
+    if not isinstance(data, dict):
+        raise ValueError("Invalid JSON payload")
+    
+    required_fields = ["homeTeam", "awayTeam", "league"]
+    missing_fields = [field for field in required_fields if field not in data]
+    if missing_fields:
+        raise ValueError(f"Missing required field: {missing_fields[0]}")
+
+
+def _handle_precomputed_prediction(data):
+    """Handle precomputed prediction from agent payload."""
+    prediction = Prediction(
+        match_id=data["matchId"],
+        predicted_outcome=data["prediction"],
+        confidence=data["confidence"],
+        factors=data["factors"],
+        timestamp=data["timestamp"],
+    )
+    
+    prediction_id = db.add_prediction(prediction)
+    
+    return {
+        "success": True,
+        "predictionId": prediction_id,
+        "matchId": prediction.match_id,
+        "prediction": prediction.predicted_outcome,
+        "confidence": prediction.confidence,
+        "factors": prediction.factors,
+        "timestamp": prediction.timestamp,
+    }
+
+
+def _generate_match_id(data):
+    """Generate match ID from fixture or match data."""
+    match_id = data.get("matchId")
+    fixture_id = data.get("fixtureId")
+    
+    if not match_id and fixture_id is not None and str(fixture_id).isdigit():
+        match_id = f"{data['league']}-{int(fixture_id)}"
+    
+    return match_id
+
+
+def _submit_to_blockchain(data, prediction_result):
+    """Submit prediction to blockchain if enabled."""
+    if not blockchain or not blockchain.enabled:
+        return None
+    
+    try:
+        from datetime import datetime
+        match_date_ts = int(prediction_result.get("timestamp", prediction_result["timestamp"]))
+        
+        result = blockchain.submit_prediction(
+            home_team=data["homeTeam"],
+            away_team=data["awayTeam"],
+            league=data["league"],
+            prediction=prediction_result["prediction"],
+            confidence=prediction_result["confidence"],
+            match_date=match_date_ts,
+        )
+        
+        if result.success:
+            logger.info(f"Prediction recorded on-chain: {result.tx_hash}")
+        else:
+            logger.warning(f"Blockchain submission failed: {result.error}")
+            
+        return result
+        
+    except Exception as e:
+        logger.error(f"Blockchain submission error: {e}")
+        return None
+
+
+def _build_response_data(prediction_id, prediction, prediction_result, blockchain_result):
+    """Build the response data for the prediction."""
+    response_data = {
+        "success": True,
+        "predictionId": prediction_id,
+        "matchId": prediction.match_id,
+        "league": prediction.league,
+        "prediction": prediction.predicted_outcome,
+        "confidence": prediction.confidence,
+        "edge": prediction_result.get("edge"),
+        "marketOdds": prediction_result.get("marketOdds"),
+        "trueProbabilities": prediction_result.get("trueProbabilities"),
+        "factors": prediction.factors,
+        "timestamp": prediction.timestamp,
+    }
+    
+    if blockchain_result:
+        response_data["blockchain"] = {
+            "submitted": blockchain_result.success,
+            "txHash": blockchain_result.tx_hash,
+            "onChainId": blockchain_result.prediction_id,
+            "error": blockchain_result.error,
+        }
+    
+    return response_data
+
+
 @app.route("/api/predict", methods=["POST"])
 def create_prediction():
     """
@@ -108,54 +210,15 @@ def create_prediction():
     """
     try:
         data = request.get_json()
-
-        if not isinstance(data, dict):
-            return jsonify({"success": False, "error": "Invalid JSON payload"}), 400
+        _validate_prediction_request(data)
 
         # Accept precomputed predictions (agent payload)
         if all(k in data for k in ["matchId", "prediction", "confidence", "factors", "timestamp"]):
-            prediction = Prediction(
-                match_id=data["matchId"],
-                predicted_outcome=data["prediction"],
-                confidence=data["confidence"],
-                factors=data["factors"],
-                timestamp=data["timestamp"],
-            )
-
-            prediction_id = db.add_prediction(prediction)
-
-            return (
-                jsonify(
-                    {
-                        "success": True,
-                        "predictionId": prediction_id,
-                        "matchId": prediction.match_id,
-                        "prediction": prediction.predicted_outcome,
-                        "confidence": prediction.confidence,
-                        "factors": prediction.factors,
-                        "timestamp": prediction.timestamp,
-                    }
-                ),
-                201,
-            )
-
-        # Validate input
-        required_fields = ["homeTeam", "awayTeam", "league"]
-        for field in required_fields:
-            if field not in data:
-                return (
-                    jsonify(
-                        {"success": False, "error": f"Missing required field: {field}"}
-                    ),
-                    400,
-                )
+            response_data = _handle_precomputed_prediction(data)
+            return jsonify(response_data), 201
 
         # Generate prediction
-        match_id = data.get("matchId")
-        fixture_id = data.get("fixtureId")
-        if not match_id and fixture_id is not None and str(fixture_id).isdigit():
-            match_id = f"{data['league']}-{int(fixture_id)}"
-
+        match_id = _generate_match_id(data)
         prediction_result = prediction_engine.predict(
             home_team=data["homeTeam"],
             away_team=data["awayTeam"],
@@ -180,29 +243,8 @@ def create_prediction():
         # Store in database
         prediction_id = db.add_prediction(prediction)
 
-        # Optionally submit to blockchain
-        blockchain_result = None
-        if blockchain and blockchain.enabled:
-            try:
-                from datetime import datetime
-                # Parse match date from prediction
-                match_date_ts = int(prediction.timestamp)  # Use prediction timestamp as fallback
-                
-                blockchain_result = blockchain.submit_prediction(
-                    home_team=data["homeTeam"],
-                    away_team=data["awayTeam"],
-                    league=data["league"],
-                    prediction=prediction_result["prediction"],
-                    confidence=prediction_result["confidence"],
-                    match_date=match_date_ts,
-                )
-                
-                if blockchain_result.success:
-                    logger.info(f"Prediction recorded on-chain: {blockchain_result.tx_hash}")
-                else:
-                    logger.warning(f"Blockchain submission failed: {blockchain_result.error}")
-            except Exception as e:
-                logger.error(f"Blockchain submission error: {e}")
+        # Submit to blockchain
+        blockchain_result = _submit_to_blockchain(data, prediction_result)
 
         logger.info(
             "Prediction created: %s → %s (conf=%.1f%%, edge=%.1f%%)",
@@ -212,30 +254,8 @@ def create_prediction():
             prediction_result.get("edge", 0) * 100,
         )
 
-        # Return response
-        response_data = {
-            "success": True,
-            "predictionId": prediction_id,
-            "matchId": prediction.match_id,
-            "league": prediction.league,
-            "prediction": prediction.predicted_outcome,
-            "confidence": prediction.confidence,
-            "edge": prediction_result.get("edge"),
-            "marketOdds": prediction_result.get("marketOdds"),
-            "trueProbabilities": prediction_result.get("trueProbabilities"),
-            "factors": prediction.factors,
-            "timestamp": prediction.timestamp,
-        }
-        
-        # Include blockchain info if available
-        if blockchain_result:
-            response_data["blockchain"] = {
-                "submitted": blockchain_result.success,
-                "txHash": blockchain_result.tx_hash,
-                "onChainId": blockchain_result.prediction_id,
-                "error": blockchain_result.error,
-            }
-
+        # Build and return response
+        response_data = _build_response_data(prediction_id, prediction, prediction_result, blockchain_result)
         return jsonify(response_data), 201
 
     except _NoValueBet as e:
@@ -412,93 +432,236 @@ def resolve_prediction():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def _validate_resolution_params(data):
+    """Validate and extract resolution parameters."""
+    try:
+        max_items = int(data.get("max", 10))
+    except (ValueError, TypeError):
+        max_items = 10
+    
+    try:
+        time_budget_seconds = float(data.get("timeBudgetSeconds", 20))
+    except (ValueError, TypeError):
+        time_budget_seconds = 20.0
+    
+    return max(1, max_items), time_budget_seconds
+
+
+def _should_skip_resolution(force_resolution):
+    """Check if resolution should be skipped due to no matches today."""
+    if force_resolution:
+        return None
+    
+    if not resolver.has_matches_today():
+        return jsonify({
+            "success": True,
+            "message": "No matches scheduled today - skipping AI resolution",
+            "resolved": 0,
+            "processed": 0,
+            "cost_saved": True,
+            "results": [],
+            "errors": []
+        }), 200
+    
+    return None
+
+
+def _process_single_prediction(prediction, resolver, db):
+    """Process a single prediction and return result or error."""
+    try:
+        actual_outcome = resolver.get_match_result(prediction.match_id)
+    except Exception as e:
+        return {
+            "type": "error",
+            "data": {
+                "matchId": prediction.match_id,
+                "predictionId": prediction.prediction_id,
+                "error": str(e),
+            }
+        }
+    
+    if not actual_outcome:
+        return {"type": "skipped"}
+    
+    is_correct = prediction.predicted_outcome == actual_outcome
+    db.resolve_prediction(prediction.prediction_id, actual_outcome, is_correct)
+    
+    return {
+        "type": "success",
+        "data": {
+            "matchId": prediction.match_id,
+            "predictionId": prediction.prediction_id,
+            "correct": is_correct,
+        }
+    }
+
+
+def _process_predictions(unresolved, max_items, time_budget_seconds, resolver, db):
+    """Process all predictions within limits."""
+    results = []
+    errors = []
+    started = time.monotonic()
+    processed = 0
+    
+    for prediction in unresolved:
+        if processed >= max_items or (time.monotonic() - started) >= time_budget_seconds:
+            break
+        
+        result = _process_single_prediction(prediction, resolver, db)
+        
+        if result["type"] == "error":
+            errors.append(result["data"])
+        elif result["type"] == "success":
+            results.append(result["data"])
+        
+        processed += 1
+    
+    return results, errors, processed
+
+
 @app.route("/api/resolve/auto", methods=["POST"])
 def auto_resolve():
     """
     Automatically resolve all unresolved predictions
-    Fetches actual results from external API
+    Smart resolution: only runs AI on match days to save costs
 
     Output JSON:
     {
         "success": true,
         "resolved": 5,
-        "results": [...]
+        "results": [...],
+        "message": "AI resolution completed" or "No matches today - skipping"
     }
     """
     try:
-        unresolved = db.get_unresolved_predictions()
-        results = []
-        errors = []
-
         data = request.get_json(silent=True) or {}
-
-        try:
-            max_items = int(data.get("max", 10))
-        except (ValueError, TypeError):
-            max_items = 10
-
-        try:
-            time_budget_seconds = float(data.get("timeBudgetSeconds", 20))
-        except (ValueError, TypeError):
-            time_budget_seconds = 20.0
-
-        if max_items < 1:
-            max_items = 1
-
-        started = time.monotonic()
-        processed = 0
-
-        for prediction in unresolved:
-            if processed >= max_items:
-                break
-            if (time.monotonic() - started) >= time_budget_seconds:
-                break
-
-            try:
-                actual_outcome = resolver.get_match_result(prediction.match_id)
-            except Exception as e:
-                errors.append(
-                    {
-                        "matchId": prediction.match_id,
-                        "predictionId": prediction.prediction_id,
-                        "error": str(e),
-                    }
-                )
-                processed += 1
-                continue
-
-            if not actual_outcome:
-                processed += 1
-                continue
-
-            is_correct = prediction.predicted_outcome == actual_outcome
-            db.resolve_prediction(prediction.prediction_id, actual_outcome, is_correct)
-
-            results.append(
-                {
-                    "matchId": prediction.match_id,
-                    "predictionId": prediction.prediction_id,
-                    "correct": is_correct,
-                }
-            )
-            processed += 1
-
-        # remaining = unresolved predictions that we touched but couldn't resolve yet
-        remaining = max(0, len(unresolved) - len(results))
-        return (
-            jsonify(
-                {
-                    "success": True,
-                    "resolved": len(results),
-                    "processed": processed,
-                    "remaining": remaining,
-                    "results": results,
-                    "errors": errors,
-                }
-            ),
-            200,
+        force_resolution = data.get("force", False)
+        
+        # Check if we should skip resolution
+        skip_response = _should_skip_resolution(force_resolution)
+        if skip_response:
+            return skip_response
+        
+        # Get unresolved predictions and validate parameters
+        unresolved = db.get_unresolved_predictions()
+        max_items, time_budget_seconds = _validate_resolution_params(data)
+        
+        # Process predictions
+        results, errors, processed = _process_predictions(
+            unresolved, max_items, time_budget_seconds, resolver, db
         )
+        
+        remaining = max(0, len(unresolved) - len(results))
+        message = "AI resolution completed" if not force_resolution else "Forced AI resolution completed"
+        
+        return jsonify({
+            "success": True,
+            "message": message,
+            "resolved": len(results),
+            "processed": processed,
+            "remaining": remaining,
+            "results": results,
+            "errors": errors,
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
+
+@app.route("/api/resolve/schedule", methods=["GET"])
+def get_resolution_schedule():
+    """
+    Get upcoming match schedule for resolution planning
+    
+    Returns:
+    {
+        "success": true,
+        "schedule": {
+            "EPL": ["2026-03-22", "2026-03-25"],
+            "LaLiga": ["2026-03-23", "2026-03-26"],
+            ...
+        },
+        "has_matches_today": true,
+        "today": "2026-03-22"
+    }
+    """
+    try:
+        days_ahead = request.args.get("days", 7, type=int)
+        schedule = resolver.get_match_schedule(days_ahead)
+        has_matches_today = resolver.has_matches_today()
+        
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        return jsonify({
+            "success": True,
+            "schedule": schedule,
+            "has_matches_today": has_matches_today,
+            "today": today,
+            "days_ahead": days_ahead
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/resolve/override", methods=["POST"])
+def override_resolution():
+    """
+    Admin endpoint to override already resolved predictions
+    Use this to correct incorrect resolution data
+    
+    Input JSON:
+    {
+        "matchId": "EPL-BRI-LIV-2026-03-21",
+        "actualOutcome": "HOME_WIN",
+        "force": true
+    }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No data provided"}), 400
+        
+        match_id = data.get("matchId")
+        actual_outcome = data.get("actualOutcome")
+        force = data.get("force", False)
+        
+        if not all([match_id, actual_outcome]):
+            return jsonify({"success": False, "error": "matchId and actualOutcome required"}), 400
+        
+        if actual_outcome not in ["HOME_WIN", "DRAW", "AWAY_WIN"]:
+            return jsonify({"success": False, "error": "actualOutcome must be HOME_WIN, DRAW, or AWAY_WIN"}), 400
+        
+        # Get the prediction
+        predictions = db.get_predictions_by_match(match_id)
+        if not predictions:
+            return jsonify({"success": False, "error": "No predictions found for this match"}), 404
+        
+        prediction = predictions[0]
+        
+        # Check if already resolved and not forced
+        if prediction.resolved and not force:
+            return jsonify({
+                "success": False, 
+                "error": "Prediction already resolved. Use force=true to override."
+            }), 400
+        
+        # Update the resolution
+        is_correct = prediction.predicted_outcome == actual_outcome
+        db.resolve_prediction(prediction.prediction_id, actual_outcome, is_correct)
+        
+        return jsonify({
+            "success": True,
+            "message": "Resolution updated successfully",
+            "matchId": match_id,
+            "predictionId": prediction.prediction_id,
+            "actualOutcome": actual_outcome,
+            "predictedOutcome": prediction.predicted_outcome,
+            "correct": is_correct,
+            "overridden": prediction.resolved and force
+        }), 200
+        
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

@@ -9,16 +9,13 @@ Commands:
 Automated alerts:
     send_prediction_alert_sync() — Called by the agent after each value bet is found.
     Posts to #predictions channel with match details, confidence, edge, and factors.
-
-NOT in scope:
-    - ERC-8004 registration or !agent commands (Nnenna's responsibility)
-    - Any wallet or signing logic
 """
 
 import os
 import logging
 import asyncio
 import threading
+import aiohttp
 import requests as http_requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -73,23 +70,33 @@ class FootyOracleDiscordBot:
     # =========================================================================
 
     def _register_commands(self):
-        bot = self.bot
+        """Register all Discord bot commands."""
+        self._register_on_ready()
+        self._register_predict_command()
+        self._register_results_command()
+        self._register_stats_command()
+        self._register_help_command()
 
-        @bot.event
+    def _register_on_ready(self):
+        """Register the on_ready event handler."""
+        @self.bot.event
         async def on_ready():
-            logger.info("FootyOracle Discord bot connected as %s", bot.user)
+            logger.info("FootyOracle Discord bot connected as %s", self.bot.user)
 
-        @bot.command(name="predict")
+    def _register_predict_command(self):
+        """Register the predict command."""
+        @self.bot.command(name="predict")
         async def predict_cmd(ctx):
             """Show today's pending predictions."""
             try:
-                resp = http_requests.get(
-                    f"{self.backend_url}/api/predictions",
-                    params={"resolved": "false", "limit": "10"},
-                    timeout=10,
-                )
-                data = resp.json()
-                predictions = data.get("predictions", [])
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{self.backend_url}/api/predictions",
+                        params={"resolved": "false", "limit": "10"},
+                        timeout=10,
+                    ) as resp:
+                        data = await resp.json()
+                        predictions = data.get("predictions", [])
 
                 if not predictions:
                     await ctx.send("🔮 No pending predictions today.")
@@ -107,17 +114,20 @@ class FootyOracleDiscordBot:
                 logger.error("Discord !predict error: %s", e)
                 await ctx.send("⚠️ Could not fetch predictions.")
 
-        @bot.command(name="results")
+    def _register_results_command(self):
+        """Register the results command."""
+        @self.bot.command(name="results")
         async def results_cmd(ctx):
             """Show the last 5 resolved predictions."""
             try:
-                resp = http_requests.get(
-                    f"{self.backend_url}/api/predictions",
-                    params={"resolved": "true", "limit": "5"},
-                    timeout=10,
-                )
-                data = resp.json()
-                predictions = data.get("predictions", [])
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{self.backend_url}/api/predictions",
+                        params={"resolved": "true", "limit": "5"},
+                        timeout=10,
+                    ) as resp:
+                        data = await resp.json()
+                        predictions = data.get("predictions", [])
 
                 if not predictions:
                     await ctx.send("📊 No resolved predictions yet.")
@@ -136,14 +146,17 @@ class FootyOracleDiscordBot:
                 logger.error("Discord !results error: %s", e)
                 await ctx.send("⚠️ Could not fetch results.")
 
-        @bot.command(name="stats")
+    def _register_stats_command(self):
+        """Register the stats command."""
+        @self.bot.command(name="stats")
         async def stats_cmd(ctx):
             """Show overall accuracy stats."""
             try:
-                resp = http_requests.get(
-                    f"{self.backend_url}/api/stats", timeout=10
-                )
-                data = resp.json()
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{self.backend_url}/api/stats", timeout=10
+                    ) as resp:
+                        data = await resp.json()
                 stats = data.get("statistics", data)
 
                 total = stats.get("totalPredictions", 0)
@@ -163,7 +176,9 @@ class FootyOracleDiscordBot:
                 logger.error("Discord !stats error: %s", e)
                 await ctx.send("⚠️ Could not fetch stats.")
 
-        @bot.command(name="help")
+    def _register_help_command(self):
+        """Register the help command."""
+        @self.bot.command(name="help")
         async def help_cmd(ctx):
             await ctx.send(
                 "**🤖 FootyOracle Commands**\n\n"

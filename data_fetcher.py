@@ -48,7 +48,6 @@ class DataFetcher:
         self.ai_enricher = AIEnricher()
         self.ai_enrichment_enabled = os.getenv("AI_ENRICHMENT_ENABLED", "True").lower() == "true"
 
-        # Agent ID (read-only — set by Nnenna after contract deployment)
         self.agent_id = os.getenv("AGENT_ID", "")
 
         # Mock mode
@@ -248,6 +247,21 @@ class DataFetcher:
         headers = {"X-Auth-Token": self.football_api_key}
         return self._make_request(url, headers, f"team_matches_{team_id}")
 
+    def _is_between_teams(self, match_home_id: int, match_away_id: int, home_id: int, away_id: int) -> bool:
+        return (match_home_id == home_id and match_away_id == away_id) or (
+            match_home_id == away_id and match_away_id == home_id
+        )
+
+    def _determine_venue_winner(self, match_home_id: int, match_away_id: int, home_score: int, away_score: int) -> Optional[int]:
+        if home_score > away_score:
+            return match_home_id
+        elif away_score > home_score:
+            return match_away_id
+        return None
+
+    def _map_to_home_away_perspective(self, venue_winner: int, home_id: int) -> str:
+        return "HOME" if venue_winner == home_id else "AWAY"
+
     def _parse_h2h_results(
         self, matches: List[Dict], home_id: int, away_id: int, last_n: int
     ) -> List[str]:
@@ -255,37 +269,23 @@ class DataFetcher:
         Returns results from the perspective of home_id (the designated home team).
         HOME = home_id won, AWAY = away_id won, DRAW = draw.
         """
-        def is_between_teams(match_home_id: int, match_away_id: int) -> bool:
-            return (match_home_id == home_id and match_away_id == away_id) or (
-                match_home_id == away_id and match_away_id == home_id
-            )
-
         results: List[str] = []
         for match in matches:
             match_home_id = match["homeTeam"]["id"]
             match_away_id = match["awayTeam"]["id"]
-            if not is_between_teams(match_home_id, match_away_id):
+            
+            if not self._is_between_teams(match_home_id, match_away_id, home_id, away_id):
                 continue
 
             home_score = match["score"]["fullTime"]["home"]
             away_score = match["score"]["fullTime"]["away"]
 
-            # Determine winner in terms of the actual match venue
-            if home_score > away_score:
-                venue_winner = match_home_id
-            elif away_score > home_score:
-                venue_winner = match_away_id
-            else:
+            venue_winner = self._determine_venue_winner(match_home_id, match_away_id, home_score, away_score)
+            
+            if venue_winner is None:
                 results.append("DRAW")
-                if len(results) >= last_n:
-                    break
-                continue
-
-            # Map to HOME/AWAY from home_id's perspective
-            if venue_winner == home_id:
-                results.append("HOME")
             else:
-                results.append("AWAY")
+                results.append(self._map_to_home_away_perspective(venue_winner, home_id))
 
             if len(results) >= last_n:
                 break

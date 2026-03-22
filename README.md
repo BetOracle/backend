@@ -96,8 +96,8 @@ See `docs/DEPLOY_RENDER.md` for Render-specific instructions.
 - [x] Mock data (96 teams)
 - [x] Real API integration
 - [x] Comprehensive tests
-- [ ] ERC-8004 blockchain integration (Nnenna)
-- [ ] Frontend dashboard (Lynn)
+- [ ] ERC-8004 blockchain integration
+- [ ] Frontend dashboard
 - [ ] Discord bot
 
 ---
@@ -105,8 +105,9 @@ See `docs/DEPLOY_RENDER.md` for Render-specific instructions.
 ## 👥 Team
 
 **Backend & Agent:** Pope  
-**Smart Contracts:** Nnenna (ERC-8004 integration)  
-**Frontend:** Lynn (Dashboard UI)
+**Smart Contracts:** Pope (ERC-8004 integration)  
+**Frontend:** Nnenna (Dashboard UI)
+**Project Management:** Lynn (Project management)
 
 ---
 
