@@ -415,6 +415,66 @@ def get_prediction(prediction_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/api/admin/purge-predictions", methods=["POST"])
+def purge_predictions():
+    try:
+        data = request.get_json(silent=True) or {}
+        dry_run = bool(data.get("dryRun", True))
+        delete_unresolved = bool(data.get("deleteUnresolved", True))
+        delete_test = bool(data.get("deleteTest", True))
+        sample_limit = int(data.get("sample", 25))
+
+        preds = db.get_all_predictions(page=1, limit=500)
+
+        to_delete = []
+        for p in preds:
+            if delete_unresolved and not p.resolved:
+                to_delete.append(p)
+                continue
+            if delete_test and (p.league == "TEST" or (p.match_id or "").startswith("TEST-")):
+                to_delete.append(p)
+
+        # Deduplicate by prediction_id
+        seen = set()
+        uniq = []
+        for p in to_delete:
+            if p.prediction_id in seen:
+                continue
+            seen.add(p.prediction_id)
+            uniq.append(p)
+
+        sample = [p.to_dict() for p in uniq[: max(0, sample_limit)]]
+
+        if dry_run:
+            return jsonify({
+                "success": True,
+                "dryRun": True,
+                "deleteUnresolved": delete_unresolved,
+                "deleteTest": delete_test,
+                "wouldDelete": len(uniq),
+                "sample": sample,
+            }), 200
+
+        deleted = 0
+        if delete_unresolved:
+            deleted += db.delete_unresolved_predictions()
+
+        if delete_test:
+            deleted += db.delete_predictions_by_match_id_prefix("TEST-")
+
+        return jsonify({
+            "success": True,
+            "dryRun": False,
+            "deleteUnresolved": delete_unresolved,
+            "deleteTest": delete_test,
+            "deleted": int(deleted),
+            "sample": sample,
+        }), 200
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/admin/migrate-match-ids", methods=["POST"])
 def migrate_match_ids():
     try:

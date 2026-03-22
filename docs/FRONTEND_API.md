@@ -62,7 +62,10 @@ Notes:
 - `confidence` is a 0..1 float.
 - `resolved` is boolean.
 - `actualOutcome`, `correct`, `resolutionTimestamp` are present when resolved.
-- `matchId` is stable when created from a fixture id: `{league}-{fixtureId}`.
+- `matchId` is stable and AI-resolvable. Preferred format when `fixtureId` is known:
+  - `{league}-{fixtureId}-{homeCode}-{awayCode}-{YYYY-MM-DD}`
+  - Example: `EPL-538093-TOT-NOT-2026-03-22`
+  - `homeCode` / `awayCode` are normalized 3-letter codes (common prefixes like `FC` are ignored).
 
 ---
 
@@ -164,7 +167,7 @@ Response:
 {
   "success": true,
   "predictionId": "offchain-1700000000",
-  "matchId": "EPL-123456",
+  "matchId": "EPL-123456-ARS-CHE-2026-02-13",
   "league": "EPL",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
@@ -202,6 +205,53 @@ Notes:
   ```
   https://celoscan.io/tx/{blockchain.txHash}
   ```
+
+---
+
+## Admin endpoints
+
+### Migrate legacy match IDs (unresolved predictions)
+`POST /api/admin/migrate-match-ids`
+
+Purpose:
+- Converts legacy unresolved `matchId` values like `{league}-{fixtureId}` into the preferred AI-resolvable format:
+  - `{league}-{fixtureId}-{homeCode}-{awayCode}-{YYYY-MM-DD}`
+
+Body (JSON):
+```json
+{
+  "dryRun": true,
+  "daysAhead": 14,
+  "max": 200
+}
+```
+
+Notes:
+- `dryRun` defaults to `true`.
+- Only updates predictions where `resolved=false`.
+
+---
+
+### Purge predictions
+`POST /api/admin/purge-predictions`
+
+Purpose:
+- Deletes predictions from the database.
+
+Body (JSON):
+```json
+{
+  "dryRun": true,
+  "deleteUnresolved": true,
+  "deleteTest": true,
+  "sample": 25
+}
+```
+
+Notes:
+- `dryRun` defaults to `true`.
+- If `deleteUnresolved=true`, removes all predictions where `resolved=false`.
+- If `deleteTest=true`, removes predictions where `matchId` starts with `TEST-`.
 
 ---
 

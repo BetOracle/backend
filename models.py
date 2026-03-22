@@ -387,6 +387,26 @@ class PredictionDatabase:
             conn.commit()
         return cur.rowcount > 0
 
+    def delete_unresolved_predictions(self) -> int:
+        """Delete all unresolved (resolved=FALSE) predictions. Returns number deleted."""
+        with self._lock, self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM predictions WHERE resolved = FALSE")
+            deleted = cur.rowcount
+            conn.commit()
+        return int(deleted or 0)
+
+    def delete_predictions_by_match_id_prefix(self, prefix: str) -> int:
+        """Delete predictions where match_id starts with prefix. Returns number deleted."""
+        if prefix is None:
+            return 0
+        with self._lock, self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM predictions WHERE match_id LIKE %s", (f"{prefix}%",))
+            deleted = cur.rowcount
+            conn.commit()
+        return int(deleted or 0)
+
     def clear_all(self):
         """Clear all predictions (use with caution!)."""
         with self._lock, self._connection() as conn:
