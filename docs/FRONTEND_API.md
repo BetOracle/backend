@@ -60,7 +60,10 @@ A prediction returned by the API includes:
     "formScore": 0.7,
     "injuryImpact": -0.1,
     "h2hScore": 0.6,
-    "tablePositionScore": 0.8
+    "tablePositionScore": 0.8,
+    "homeTeam": "Tottenham Hotspur",
+    "awayTeam": "Nottingham Forest",
+    "date": "2026-03-22"
   },
   "timestamp": 1700000000,
   "resolved": false,
@@ -79,6 +82,7 @@ Notes:
   - `{league}-{fixtureId}-{homeCode}-{awayCode}-{YYYY-MM-DD}`
   - Example: `EPL-538093-TOT-NOT-2026-03-22`
   - `homeCode` / `awayCode` are normalized 3-letter codes (common prefixes like `FC` are ignored).
+- **Resolution note:** the backend persists `homeTeam`, `awayTeam`, and `date` in `factors` and prefers these stored full names for AI resolution to avoid ambiguous 3-letter code collisions (e.g., `REA`).
 
 ---
 
@@ -170,7 +174,8 @@ Request (user-driven):
   "homeTeam": "Arsenal",
   "awayTeam": "Chelsea",
   "league": "EPL",
-  "fixtureId": 123456
+  "fixtureId": 123456,
+  "date": "2026-02-13"
 }
 ```
 
@@ -199,7 +204,11 @@ Response:
     "formScore": 0.7,
     "injuryImpact": -0.1,
     "h2hScore": 0.6,
-    "tablePositionScore": 0.8
+    "tablePositionScore": 0.8,
+    "fixtureId": 123456,
+    "homeTeam": "Arsenal",
+    "awayTeam": "Chelsea",
+    "date": "2026-02-13"
   },
   "timestamp": 1700000000,
   "blockchain": {
@@ -281,6 +290,7 @@ Request (agent payload):
   "homeTeam": "Tottenham Hotspur FC",
   "awayTeam": "Nottingham Forest FC",
   "league": "EPL",
+  "date": "2026-03-22",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
   "edge": 0.18,
@@ -290,7 +300,10 @@ Request (agent payload):
     "formScore": 0.7,
     "injuryImpact": -0.1,
     "h2hScore": 0.6,
-    "tablePositionScore": 0.8
+    "tablePositionScore": 0.8,
+    "homeTeam": "Tottenham Hotspur FC",
+    "awayTeam": "Nottingham Forest FC",
+    "date": "2026-03-22"
   },
   "timestamp": 1700000000
 }
