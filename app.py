@@ -719,6 +719,37 @@ def _process_single_prediction(prediction, resolver, db):
         match_date = factors.get("date")
         match_time = factors.get("time")
 
+        # If we have a fixtureId, use the authoritative provider status to decide whether
+        # the match is truly finished. This avoids AI hallucination.
+        fixture_id = factors.get("fixtureId")
+        if fixture_id is None:
+            parts = (prediction.match_id or "").split("-")
+            if len(parts) >= 2 and str(parts[1]).isdigit():
+                fixture_id = int(parts[1])
+
+        if fixture_id is not None:
+            try:
+                info = resolver.data_fetcher.get_fixture_info(int(fixture_id))
+                status = (info or {}).get("status")
+                if status and status != "FINISHED":
+                    return {"type": "skipped", "reason": f"provider_status_{status.lower()}"}
+                # If provider says FINISHED, resolve via the fixture endpoint (truth source).
+                if status == "FINISHED":
+                    actual_outcome = resolver.data_fetcher.get_match_result(prediction.match_id)
+                    if actual_outcome:
+                        is_correct = prediction.predicted_outcome == actual_outcome
+                        db.resolve_prediction(prediction.prediction_id, actual_outcome, is_correct)
+                        return {
+                            "type": "success",
+                            "data": {
+                                "matchId": prediction.match_id,
+                                "predictionId": prediction.prediction_id,
+                                "correct": is_correct,
+                            },
+                        }
+            except Exception:
+                pass
+
         if match_date and match_time:
             try:
                 kickoff = datetime.strptime(f"{match_date} {match_time}", "%Y-%m-%d %H:%M")
@@ -727,12 +758,9 @@ def _process_single_prediction(prediction, resolver, db):
             except Exception:
                 pass
 
+        # Without fixtureId/provider status, fall back to the previous behavior.
         if home_team and away_team and match_date:
-            actual_outcome = resolver.ai_resolver.get_ai_match_result(
-                home_team, away_team, match_date
-            )
-            # If AI can't find the result (or is unavailable), fall back to fixtureId-based
-            # resolution via football-data.org.
+            actual_outcome = resolver.ai_resolver.get_ai_match_result(home_team, away_team, match_date)
             if not actual_outcome:
                 actual_outcome = resolver.data_fetcher.get_match_result(prediction.match_id)
         else:
