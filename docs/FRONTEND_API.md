@@ -83,6 +83,7 @@ Notes:
   - Example: `EPL-538093-TOT-NOT-2026-03-22`
   - `homeCode` / `awayCode` are normalized 3-letter codes (common prefixes like `FC` are ignored).
 - **Resolution note:** the backend persists `homeTeam`, `awayTeam`, and `date` in `factors` and prefers these stored full names for AI resolution to avoid ambiguous 3-letter code collisions (e.g., `REA`).
+- **Kickoff time note:** if `time` (`HH:MM`) is available, the backend persists it in `factors.time` and auto-resolve will skip resolution attempts until the match should have finished (kickoff + ~130 minutes).
 
 ---
 
@@ -175,7 +176,8 @@ Request (user-driven):
   "awayTeam": "Chelsea",
   "league": "EPL",
   "fixtureId": 123456,
-  "date": "2026-02-13"
+  "date": "2026-02-13",
+  "time": "15:00"
 }
 ```
 
@@ -208,7 +210,8 @@ Response:
     "fixtureId": 123456,
     "homeTeam": "Arsenal",
     "awayTeam": "Chelsea",
-    "date": "2026-02-13"
+    "date": "2026-02-13",
+    "time": "15:00"
   },
   "timestamp": 1700000000,
   "blockchain": {
@@ -291,6 +294,7 @@ Request (agent payload):
   "awayTeam": "Nottingham Forest FC",
   "league": "EPL",
   "date": "2026-03-22",
+  "time": "15:00",
   "prediction": "HOME_WIN",
   "confidence": 0.74,
   "edge": 0.18,
@@ -303,7 +307,8 @@ Request (agent payload):
     "tablePositionScore": 0.8,
     "homeTeam": "Tottenham Hotspur FC",
     "awayTeam": "Nottingham Forest FC",
-    "date": "2026-03-22"
+    "date": "2026-03-22",
+    "time": "15:00"
   },
   "timestamp": 1700000000
 }
@@ -334,7 +339,11 @@ Response:
   "processed": 0,
   "remaining": 0,
   "results": [],
-  "errors": []
+  "errors": [],
+  "skipped": {
+    "not_finished_window": 0,
+    "no_result": 0
+  }
 }
 ```
 
