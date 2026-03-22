@@ -96,11 +96,28 @@ def _validate_prediction_request(data):
 
 def _handle_precomputed_prediction(data):
     """Handle precomputed prediction from agent payload."""
+    factors = data.get("factors") if isinstance(data.get("factors"), dict) else {}
+    # Persist full team names + match date for unambiguous AI resolution.
+    if data.get("homeTeam"):
+        factors = {**factors, "homeTeam": data.get("homeTeam")}
+    if data.get("awayTeam"):
+        factors = {**factors, "awayTeam": data.get("awayTeam")}
+    # If the agent didn't explicitly send a date, derive it from matchId when possible.
+    if data.get("date"):
+        factors = {**factors, "date": data.get("date")}
+    else:
+        match_id = data.get("matchId", "")
+        parts = match_id.split("-") if isinstance(match_id, str) else []
+        if len(parts) >= 5 and str(parts[1]).isdigit():
+            factors = {**factors, "date": "-".join(parts[4:])}
+        elif len(parts) >= 4:
+            factors = {**factors, "date": "-".join(parts[3:])}
+
     prediction = Prediction(
         match_id=data["matchId"],
         predicted_outcome=data["prediction"],
         confidence=data["confidence"],
-        factors=data["factors"],
+        factors=factors,
         timestamp=data["timestamp"],
         league=data.get("league", ""),
         edge=data.get("edge"),
@@ -301,6 +318,15 @@ def create_prediction():
         fixture_id = data.get("fixtureId")
         if fixture_id is not None and str(fixture_id).isdigit() and isinstance(factors, dict):
             factors = {**factors, "fixtureId": int(fixture_id)}
+
+        # Persist full team names + date for unambiguous AI resolution.
+        if isinstance(factors, dict):
+            if data.get("homeTeam"):
+                factors = {**factors, "homeTeam": data.get("homeTeam")}
+            if data.get("awayTeam"):
+                factors = {**factors, "awayTeam": data.get("awayTeam")}
+            if data.get("date"):
+                factors = {**factors, "date": data.get("date")}
 
         # Create prediction object
         prediction = Prediction(
@@ -682,7 +708,16 @@ def _should_skip_resolution(force_resolution):
 def _process_single_prediction(prediction, resolver, db):
     """Process a single prediction and return result or error."""
     try:
-        actual_outcome = resolver.get_match_result(prediction.match_id)
+        # Prefer resolving via stored full team names + date (avoids ambiguous 3-letter codes)
+        factors = prediction.factors if isinstance(getattr(prediction, "factors", None), dict) else {}
+        home_team = factors.get("homeTeam") or factors.get("home_team")
+        away_team = factors.get("awayTeam") or factors.get("away_team")
+        match_date = factors.get("date")
+
+        if home_team and away_team and match_date:
+            actual_outcome = resolver.ai_resolver.get_ai_match_result(home_team, away_team, match_date)
+        else:
+            actual_outcome = resolver.get_match_result(prediction.match_id)
     except Exception as e:
         return {
             "type": "error",
