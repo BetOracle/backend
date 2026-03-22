@@ -120,12 +120,28 @@ def _handle_precomputed_prediction(data):
 def _generate_match_id(data):
     """Generate match ID from fixture or match data."""
     match_id = data.get("matchId")
+    if match_id:
+        return match_id
+
+    home_team = data.get("homeTeam", "")
+    away_team = data.get("awayTeam", "")
+    league = data.get("league", "")
+    date_str = data.get("date")
     fixture_id = data.get("fixtureId")
-    
-    if not match_id and fixture_id is not None and str(fixture_id).isdigit():
-        match_id = f"{data['league']}-{int(fixture_id)}"
-    
-    return match_id
+
+    if not date_str:
+        from datetime import datetime
+
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+    if home_team and away_team and league:
+        home_abbr = home_team[:3].upper()
+        away_abbr = away_team[:3].upper()
+        if fixture_id is not None and str(fixture_id).isdigit():
+            return f"{league}-{int(fixture_id)}-{home_abbr}-{away_abbr}-{date_str}"
+        return f"{league}-{home_abbr}-{away_abbr}-{date_str}"
+
+    return None
 
 
 def _submit_to_blockchain(data, prediction_result):
@@ -227,12 +243,17 @@ def create_prediction():
             market_odds=data.get("marketOdds"),
         )
 
+        factors = prediction_result["factors"]
+        fixture_id = data.get("fixtureId")
+        if fixture_id is not None and str(fixture_id).isdigit() and isinstance(factors, dict):
+            factors = {**factors, "fixtureId": int(fixture_id)}
+
         # Create prediction object
         prediction = Prediction(
             match_id=prediction_result["matchId"],
             predicted_outcome=prediction_result["prediction"],
             confidence=prediction_result["confidence"],
-            factors=prediction_result["factors"],
+            factors=factors,
             timestamp=prediction_result["timestamp"],
             league=data["league"],
             market_odds=prediction_result.get("marketOdds"),

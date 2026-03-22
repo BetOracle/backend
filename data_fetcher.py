@@ -729,6 +729,54 @@ class DataFetcher:
             self._strict_fail(f"Error fetching matches: {e}")
             return self.mock.get_league_matches(league, days_ahead)
 
+    def get_fixture_info(self, fixture_id: int) -> Optional[Dict]:
+        """
+        Fetch team names and date for a single fixture using the permitted
+        /v4/matches/{id} endpoint (no date-range restriction on free plan).
+
+        Works for both scheduled and finished matches.
+
+        Returns:
+            {"homeTeam": "Newcastle United FC", "awayTeam": "Sunderland AFC",
+             "date": "2026-03-22", "status": "SCHEDULED"} or None
+        """
+        if self.mock_mode:
+            return None  # Mock mode doesn't map fixture IDs
+
+        if not self.football_api_key:
+            return None
+
+        try:
+            url = f"{self.football_api_url}/matches/{fixture_id}"
+            headers = {"X-Auth-Token": self.football_api_key}
+            # Reuse the same cache key as _get_match_result_by_fixture_id so we
+            # don't make a duplicate request if both methods are called for the same fixture.
+            data = self._make_request(url, headers, f"match_{fixture_id}")
+
+            if not data:
+                return None
+
+            match = data.get("match") if isinstance(data, dict) else None
+            if match is None:
+                match = data
+
+            if not isinstance(match, dict) or "homeTeam" not in match:
+                return None
+
+            match_date = datetime.fromisoformat(
+                match["utcDate"].replace("Z", "+00:00")
+            )
+            return {
+                "homeTeam": match["homeTeam"]["name"],
+                "awayTeam": match["awayTeam"]["name"],
+                "date": match_date.strftime("%Y-%m-%d"),
+                "status": match.get("status"),
+            }
+
+        except Exception as e:
+            logger.warning("Error fetching fixture info for %d: %s", fixture_id, e)
+            return None
+
     # =========================================================================
     # MARKET ODDS (AI-Powered)
     # =========================================================================

@@ -58,18 +58,18 @@ class AIEnricher:
         self.provider = os.getenv("AI_PROVIDER", "anthropic").lower()
         self.anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
         self.openai_key = os.getenv("OPENAI_API_KEY", "")
-        
+
         # Model configuration
-        self.anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+        self.anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o")
-        
+
         # Mock mode for testing without API costs
         self.mock_mode = os.getenv("AI_MOCK_MODE", "False").lower() == "true"
-        
+
         # Initialize clients if keys available
         self._claude_client = None
         self._openai_client = None
-        
+
         if self.provider == "anthropic" and self.anthropic_key and _ANTHROPIC_AVAILABLE:
             self._claude_client = anthropic.Anthropic(api_key=self.anthropic_key)
             logger.info("AIEnricher: Anthropic Claude initialized")
@@ -131,7 +131,7 @@ class AIEnricher:
         h2h_record: List[str],
     ) -> str:
         """Build the analysis prompt for the LLM"""
-        
+
         h2h_summary = ""
         if h2h_record:
             home_wins = h2h_record.count("HOME")
@@ -184,7 +184,7 @@ Focus on observable patterns from the form data provided.
 
     def _call_llm(self, prompt: str) -> str:
         """Call the configured LLM provider"""
-        
+
         if self.provider == "anthropic" and self._claude_client:
             response = self._claude_client.messages.create(
                 model=self.anthropic_model,
@@ -192,7 +192,7 @@ Focus on observable patterns from the form data provided.
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text
-            
+
         elif self.provider == "openai" and self._openai_client:
             response = self._openai_client.chat.completions.create(
                 model=self.openai_model,
@@ -200,14 +200,14 @@ Focus on observable patterns from the form data provided.
                 max_tokens=1024,
             )
             return response.choices[0].message.content
-            
+
         raise RuntimeError("No LLM client available")
 
     def _parse_llm_response(
         self, response: str, home_team: str, away_team: str
     ) -> AIEnrichedData:
         """Parse LLM JSON response into structured data"""
-        
+
         # Extract JSON from response (handle markdown code blocks)
         json_str = response
         if JSON_CODE_BLOCK_START in response:
@@ -259,7 +259,7 @@ Focus on observable patterns from the form data provided.
         self, home_team: str, away_team: str, home_form: List[str], away_form: List[str]
     ) -> AIEnrichedData:
         """Generate mock enrichment data when AI is unavailable"""
-        
+
         # Calculate basic form scores for mock insights
         def form_score(form):
             if not form:
@@ -267,17 +267,17 @@ Focus on observable patterns from the form data provided.
             wins = form.count("W")
             draws = form.count("D")
             return (wins * 3 + draws) / (len(form) * 3)
-        
+
         home_score = form_score(home_form)
         away_score = form_score(away_form)
-        
+
         if home_score > away_score:
             momentum = "home"
         elif away_score > home_score:
             momentum = "away"
         else:
             momentum = "neutral"
-        
+
         insights = [
             f"{home_team} showing {'strong' if home_score > 0.6 else 'mixed'} home form",
             f"{away_team} {'performing well' if away_score > 0.6 else 'struggling'} on the road",
