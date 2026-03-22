@@ -91,24 +91,38 @@ class AIResolver:
     def expand_team_names(self, team_code: str) -> str:
         """Expand team codes to full names"""
         team_mapping = {
+            # EPL
             "ARS": "Arsenal", "CHE": "Chelsea", "MUN": "Manchester United", "MCI": "Manchester City",
-            "LIV": "Liverpool", "BRI": "Brighton", "TOT": "Tottenham", "WHU": "West Ham",
-            "NEW": "Newcastle", "LEI": "Leicester", "AVL": "Aston Villa", "EVE": "Everton",
-            "WOL": "Wolves", "CRY": "Crystal Palace", "SOU": "Southampton", "FUL": "Fulham",
-            "LEE": "Leeds United", "BUR": "Burnley", "NOT": "Nottingham Forest", 
-            "BHA": "Brighton", "BRH": "Brighton",
+            "LIV": "Liverpool", "BRI": "Brighton", "TOT": "Tottenham Hotspur", "WHU": "West Ham United",
+            "NEW": "Newcastle United", "AVL": "Aston Villa", "EVE": "Everton",
+            "WOL": "Wolverhampton Wanderers", "CRY": "Crystal Palace", "SOU": "Southampton",
+            "FUL": "Fulham", "NOT": "Nottingham Forest", "SUN": "Sunderland",
+            "BHA": "Brighton", "BRH": "Brighton", "AST": "Aston Villa", "WES": "West Ham United",
             # La Liga
-            "BAR": "Barcelona", "RMA": "Real Madrid", "ATM": "Atletico Madrid", "VAL": "Valencia",
-            "SEV": "Sevilla", "BET": "Real Betis", "SOC": "Real Sociedad", "ATH": "Athletic Bilbao",
+            "BAR": "Barcelona", "REA": "Real Madrid", "RMA": "Real Madrid",
+            "ATM": "Atletico Madrid", "ATH": "Athletic Bilbao",
+            "VAL": "Valencia", "SEV": "Sevilla", "BET": "Real Betis",
+            "SOC": "Real Sociedad", "CEL": "Celta Vigo", "DEP": "Deportivo Alaves",
+            "CLU": "Real Valladolid", "RAY": "Rayo Vallecano", "OSA": "Osasuna",
+            "VIL": "Villarreal", "GIR": "Girona", "GET": "Getafe", "MAL": "RCD Mallorca",
+            "ESP": "Espanyol", "LEG": "Leganes",
             # Serie A
             "JUV": "Juventus", "INT": "Inter Milan", "MIL": "AC Milan", "NAP": "Napoli",
-            "ROM": "Roma", "LAZ": "Lazio", "FIO": "Fiorentina", "ATA": "Atalanta",
+            "ROM": "AS Roma", "LAZ": "Lazio", "FIO": "Fiorentina", "ATA": "Atalanta",
+            "ACF": "Fiorentina", "BOL": "Bologna", "TOR": "Torino",
+            "HEL": "Hellas Verona", "UDI": "Udinese", "MON": "Monza",
+            "EMP": "Empoli", "VEN": "Venezia", "COM": "Como", "SS": "SS Lazio",
             # Bundesliga
-            "BAY": "Bayern Munich", "DOR": "Borussia Dortmund", "LEB": "RB Leipzig", 
-            "B04": "Bayer Leverkusen",
+            "BAY": "Bayern Munich", "DOR": "Borussia Dortmund", "LEI": "RB Leipzig",
+            "B04": "Bayer Leverkusen", "AUG": "FC Augsburg", "STU": "VfB Stuttgart",
+            "FSV": "FSV Mainz 05", "EIN": "Eintracht Frankfurt", "FRE": "SC Freiburg",
+            "ST": "VfB Stuttgart", "WER": "Werder Bremen", "HOF": "TSG Hoffenheim",
             # Ligue 1
-            "PSG": "Paris Saint-Germain", "MAR": "Marseille", "LYO": "Lyon", "MON": "Monaco",
-            "LIL": "Lille", "REN": "Rennes"
+            "PSG": "Paris Saint-Germain", "MAR": "Marseille", "LYO": "Olympique Lyon",
+            "MON": "Monaco", "LIL": "Lille", "REN": "Rennes", "NAN": "Nantes",
+            "STR": "RC Strasbourg", "STA": "Stade de Reims", "OLY": "Olympique Lyon",
+            "PAR": "Paris Saint-Germain", "NIC": "OGC Nice", "ANG": "Angers",
+            "AUX": "Auxerre", "LE": "Le Havre",
         }
         return team_mapping.get(team_code.upper(), team_code)
 
