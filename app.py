@@ -634,11 +634,9 @@ def override_resolution():
             return jsonify({"success": False, "error": "actualOutcome must be HOME_WIN, DRAW, or AWAY_WIN"}), 400
         
         # Get the prediction
-        predictions = db.get_predictions_by_match(match_id)
-        if not predictions:
+        prediction = db.get_prediction_by_match_id(match_id)
+        if not prediction:
             return jsonify({"success": False, "error": "No predictions found for this match"}), 404
-        
-        prediction = predictions[0]
         
         # Check if already resolved and not forced
         if prediction.resolved and not force:
