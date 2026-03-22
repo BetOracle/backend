@@ -558,7 +558,9 @@ class DataFetcher:
 
     def _try_parse_fixture_match_id(self, match_id: str) -> Optional[int]:
         parts = match_id.split("-")
-        if len(parts) != 2:
+        # Format A: League-FixtureID (e.g. "EPL-538093")
+        # Format B: League-FixtureID-HomeCode-AwayCode-YYYY-MM-DD (e.g. "EPL-538093-TOT-NOT-2026-03-22")
+        if len(parts) < 2:
             return None
         fixture_part = parts[1]
         if not fixture_part.isdigit():
