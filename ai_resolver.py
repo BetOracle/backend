@@ -54,13 +54,25 @@ class AIResolver:
         """Parse match ID into components"""
         try:
             parts = match_id.split("-")
-            if len(parts) >= 4:
+            
+            # Format 1: League-HomeTeam-AwayTeam-Date (e.g., EPL-BRI-LIV-2026-03-21)
+            if len(parts) >= 4 and parts[1].isalpha():
                 return {
                     "league": parts[0],
                     "homeTeam": parts[1],
                     "awayTeam": parts[2],
-                    "date": "-".join(parts[3:])
+                    "date": "-".join(parts[3:]),
+                    "format": "descriptive"
                 }
+            
+            # Format 2: League-FixtureID (e.g., Ligue1-542641) - need to lookup teams
+            elif len(parts) == 2 and parts[1].isdigit():
+                return {
+                    "league": parts[0],
+                    "fixtureId": parts[1],
+                    "format": "fixture"
+                }
+                
         except Exception as e:
             print(f"Error parsing match ID {match_id}: {e}")
         return {}
@@ -89,6 +101,21 @@ class AIResolver:
         }
         return team_mapping.get(team_code.upper(), team_code)
     
+    def get_match_info_from_fixture(self, league: str, fixture_id: str) -> Optional[Dict[str, str]]:
+        """Get match info from fixture ID using data fetcher"""
+        try:
+            # Try to get fixture info from football-data.org
+            fixture_info = self.data_fetcher._get_match_result_by_fixture_id(int(fixture_id))
+            if fixture_info:
+                # This won't give us team names directly, so we'll need to try a different approach
+                pass
+        except Exception as e:
+            print(f"Error getting fixture info: {e}")
+        
+        # For now, we can't resolve fixture IDs with AI
+        # These will fall back to the original data fetcher
+        return None
+
     def get_ai_match_result(self, home_team: str, away_team: str, match_date: str) -> Optional[str]:
         """Get match result using AI to search for real-time results"""
         
@@ -140,7 +167,7 @@ Do not include scores, explanations, or any other text. Just return the result."
         Get match result using AI
         
         Args:
-            match_id: Match identifier (e.g., "EPL-ARS-CHE-2026-02-12")
+            match_id: Match identifier (e.g., "EPL-ARS-CHE-2026-02-12" or "Ligue1-542641")
             
         Returns:
             "HOME_WIN", "DRAW", or "AWAY_WIN" or None
@@ -149,11 +176,20 @@ Do not include scores, explanations, or any other text. Just return the result."
         if not parsed:
             return None
         
-        home_team = parsed.get("homeTeam", "")
-        away_team = parsed.get("awayTeam", "")
-        match_date = parsed.get("date", "")
+        # Format 1: Descriptive IDs (AI can handle these)
+        if parsed.get("format") == "descriptive":
+            home_team = parsed.get("homeTeam", "")
+            away_team = parsed.get("awayTeam", "")
+            match_date = parsed.get("date", "")
+            
+            if not all([home_team, away_team, match_date]):
+                return None
+            
+            return self.get_ai_match_result(home_team, away_team, match_date)
         
-        if not all([home_team, away_team, match_date]):
-            return None
+        # Format 2: Fixture IDs (AI cannot handle these - fall back to data fetcher)
+        elif parsed.get("format") == "fixture":
+            print(f"Fixture ID format {match_id} - using data fetcher fallback")
+            return None  # Let resolver fall back to data fetcher
         
-        return self.get_ai_match_result(home_team, away_team, match_date)
+        return None
