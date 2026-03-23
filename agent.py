@@ -258,82 +258,101 @@ class FootyOracleAgent:
 
         return prediction
 
-    def _record_prediction(self, prediction_data: dict, match: dict = None, league: str = ""):
-        """Record prediction in local DB and send to backend API."""
+    def _resolve_league(self, prediction_data: dict, league: str) -> str:
+        match_id = prediction_data.get("matchId")
+        if league:
+            return league
+        if not match_id:
+            return ""
+        return match_id.split("-")[0]
 
-        # Derive league: use explicit param if available, fall back to matchId prefix
-        resolved_league = league or (prediction_data.get("matchId", "-").split("-")[0] if prediction_data.get("matchId") else "")
+    def _save_prediction_local(self, prediction_data: dict, resolved_league: str) -> None:
+        if not self.db:
+            return
+        prediction = Prediction(
+            match_id=prediction_data["matchId"],
+            predicted_outcome=prediction_data["prediction"],
+            confidence=prediction_data["confidence"],
+            factors=prediction_data["factors"],
+            timestamp=prediction_data["timestamp"],
+            league=resolved_league,
+        )
+        self.db.add_prediction(prediction)
 
-        # Save locally
-        if self.db:
-            prediction = Prediction(
-                match_id=prediction_data["matchId"],
-                predicted_outcome=prediction_data["prediction"],
-                confidence=prediction_data["confidence"],
-                factors=prediction_data["factors"],
-                timestamp=prediction_data["timestamp"],
-                league=resolved_league,
-            )
-            self.db.add_prediction(prediction)
+    def _build_backend_prediction_payload(
+        self,
+        prediction_data: dict,
+        match: dict,
+        resolved_league: str,
+    ) -> dict:
+        match = match or {}
+        return {
+            "matchId": prediction_data["matchId"],
+            "prediction": prediction_data["prediction"],
+            "confidence": prediction_data["confidence"],
+            "factors": prediction_data["factors"],
+            "timestamp": prediction_data["timestamp"],
+            "homeTeam": match.get("homeTeam", ""),
+            "awayTeam": match.get("awayTeam", ""),
+            "league": resolved_league,
+            "date": match.get("date"),
+            "time": match.get("time"),
+        }
 
-        # Send to backend API
-        max_retries = 3
+    def _post_prediction_to_backend_with_retries(self, payload: dict, max_retries: int = 3) -> None:
         for attempt in range(1, max_retries + 1):
             try:
-                # Build payload — include homeTeam/awayTeam/league so that
-                # _validate_prediction_request passes AND so the precomputed
-                # shortcut in create_prediction can also use them (e.g. blockchain).
-                home_team = (match or {}).get("homeTeam", "")
-                away_team = (match or {}).get("awayTeam", "")
-                match_date = (match or {}).get("date")
-                match_time = (match or {}).get("time")
                 response = requests.post(
                     f"{self.backend_url}/api/predict",
-                    json={
-                        "matchId": prediction_data["matchId"],
-                        "prediction": prediction_data["prediction"],
-                        "confidence": prediction_data["confidence"],
-                        "factors": prediction_data["factors"],
-                        "timestamp": prediction_data["timestamp"],
-                        "homeTeam": home_team,
-                        "awayTeam": away_team,
-                        "league": resolved_league,
-                        "date": match_date,
-                        "time": match_time,
-                    },
+                    json=payload,
                     timeout=10,
                 )
-
                 if response.status_code in (200, 201):
                     logger.info("Prediction recorded via backend API")
-                    break
-                else:
-                    logger.warning(
-                        "Backend recording failed (attempt %d/%d): HTTP %d",
-                        attempt, max_retries, response.status_code,
-                    )
-
+                    return
+                logger.warning(
+                    "Backend recording failed (attempt %d/%d): HTTP %d",
+                    attempt,
+                    max_retries,
+                    response.status_code,
+                )
             except requests.exceptions.RequestException as e:
                 logger.warning(
                     "Backend unreachable (attempt %d/%d): %s",
-                    attempt, max_retries, e,
+                    attempt,
+                    max_retries,
+                    e,
                 )
-
             if attempt < max_retries:
                 time.sleep(2 ** attempt)  # Exponential backoff
 
-        # Send Discord alert if bot is configured
-        if self._discord_bot and match:
-            try:
-                self._discord_bot.send_prediction_alert_sync(
-                    match=match,
-                    prediction=prediction_data["prediction"],
-                    confidence=prediction_data["confidence"],
-                    edge=prediction_data.get("edge", 0),
-                    factors=prediction_data.get("factors", {}),
-                )
-            except Exception as e:
-                logger.warning("Discord alert failed: %s", e)
+    def _send_discord_alert(self, prediction_data: dict, match: dict) -> None:
+        if not (self._discord_bot and match):
+            return
+        try:
+            self._discord_bot.send_prediction_alert_sync(
+                match=match,
+                prediction=prediction_data["prediction"],
+                confidence=prediction_data["confidence"],
+                edge=prediction_data.get("edge", 0),
+                factors=prediction_data.get("factors", {}),
+            )
+        except Exception as e:
+            logger.warning("Discord alert failed: %s", e)
+
+    def _record_prediction(self, prediction_data: dict, match: dict = None, league: str = ""):
+        """Record prediction in local DB and send to backend API."""
+
+        resolved_league = self._resolve_league(prediction_data, league)
+        self._save_prediction_local(prediction_data, resolved_league)
+
+        payload = self._build_backend_prediction_payload(
+            prediction_data=prediction_data,
+            match=match,
+            resolved_league=resolved_league,
+        )
+        self._post_prediction_to_backend_with_retries(payload)
+        self._send_discord_alert(prediction_data, match)
 
     def _auto_resolve_via_backend(self) -> None:
         max_loops = 30
