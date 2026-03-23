@@ -33,6 +33,10 @@ class _NoValueBet(RuntimeError):
 # Minimum edge over market to surface a prediction
 MIN_EDGE = float(os.getenv("MIN_EDGE", "0.08"))
 
+# Draw-specific guardrails to reduce low-quality draw picks.
+MIN_EDGE_DRAW = float(os.getenv("MIN_EDGE_DRAW", "0.12"))
+MIN_DRAW_PROB = float(os.getenv("MIN_DRAW_PROB", "0.28"))
+
 
 class PredictionEngine:
     """
@@ -201,7 +205,13 @@ class PredictionEngine:
             market_prob = market_probs.get(outcome, 0)
             edge = our_prob - market_prob
 
-            if edge >= MIN_EDGE and edge > best_edge:
+            min_edge = MIN_EDGE
+            if outcome == "draw":
+                if our_prob < MIN_DRAW_PROB:
+                    continue
+                min_edge = MIN_EDGE_DRAW
+
+            if edge >= min_edge and edge > best_edge:
                 best_edge = edge
                 best_bet = {
                     "outcome": outcome,
