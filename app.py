@@ -212,6 +212,76 @@ def _generate_match_id(data):
     return None
 
 
+def _extract_prediction_factors(prediction):
+    factors = prediction.factors if isinstance(getattr(prediction, "factors", None), dict) else {}
+    home_team = factors.get("homeTeam") or factors.get("home_team")
+    away_team = factors.get("awayTeam") or factors.get("away_team")
+    match_date = factors.get("date")
+    match_time = factors.get("time")
+    return factors, home_team, away_team, match_date, match_time
+
+
+def _should_skip_future_match(match_date: str):
+    if not match_date:
+        return False
+    try:
+        match_day = datetime.strptime(match_date, "%Y-%m-%d").date()
+    except Exception:
+        return False
+    return datetime.now().date() < match_day
+
+
+def _is_within_not_finished_window(match_date: str, match_time: str) -> bool:
+    if not (match_date and match_time):
+        return False
+    try:
+        kickoff = datetime.strptime(f"{match_date} {match_time}", "%Y-%m-%d %H:%M")
+    except Exception:
+        return False
+    return datetime.now() < kickoff + timedelta(minutes=130)
+
+
+def _extract_fixture_id(prediction, factors):
+    fixture_id = factors.get("fixtureId")
+    if fixture_id is not None:
+        return fixture_id
+
+    parts = (prediction.match_id or "").split("-")
+    if len(parts) >= 2 and str(parts[1]).isdigit():
+        return int(parts[1])
+
+    return None
+
+
+def _try_resolve_from_fixture_status(prediction, resolver, db, fixture_id):
+    if fixture_id is None:
+        return None
+
+    try:
+        info = resolver.data_fetcher.get_fixture_info(int(fixture_id))
+        status = (info or {}).get("status")
+        if status and status != "FINISHED":
+            return {"type": "skipped", "reason": f"provider_status_{status.lower()}"}
+
+        if status == "FINISHED":
+            actual_outcome = resolver.data_fetcher.get_match_result(prediction.match_id)
+            if actual_outcome:
+                is_correct = prediction.predicted_outcome == actual_outcome
+                db.resolve_prediction(prediction.prediction_id, actual_outcome, is_correct)
+                return {
+                    "type": "success",
+                    "data": {
+                        "matchId": prediction.match_id,
+                        "predictionId": prediction.prediction_id,
+                        "correct": is_correct,
+                    },
+                }
+    except Exception:
+        return None
+
+    return None
+
+
 def _submit_to_blockchain(data, prediction_result):
     """Submit prediction to blockchain if enabled."""
     if not blockchain or not blockchain.enabled:
@@ -265,8 +335,46 @@ def _build_response_data(prediction_id, prediction, prediction_result, blockchai
             "onChainId": blockchain_result.prediction_id,
             "error": blockchain_result.error,
         }
-    
+
     return response_data
+
+
+def _compute_league_breakdown(leagues):
+    league_stats = []
+    for lg in leagues:
+        lg_preds = db.get_predictions_by_league(lg, page=1, limit=1000)
+        if not lg_preds:
+            continue
+        resolved = sum(1 for p in lg_preds if p.resolved)
+        correct = sum(1 for p in lg_preds if p.resolved and p.correct)
+        league_stats.append({
+            "league": lg,
+            "total": len(lg_preds),
+            "resolved": resolved,
+            "correct": correct,
+            "accuracy": round(correct / resolved * 100, 1) if resolved else 0,
+        })
+    return league_stats
+
+
+def _enrich_factors_for_storage(factors, data):
+    if not isinstance(factors, dict):
+        return factors
+
+    fixture_id = data.get("fixtureId")
+    if fixture_id is not None and str(fixture_id).isdigit():
+        factors = {**factors, "fixtureId": int(fixture_id)}
+
+    if data.get("homeTeam"):
+        factors = {**factors, "homeTeam": data.get("homeTeam")}
+    if data.get("awayTeam"):
+        factors = {**factors, "awayTeam": data.get("awayTeam")}
+    if data.get("date"):
+        factors = {**factors, "date": data.get("date")}
+    if data.get("time"):
+        factors = {**factors, "time": data.get("time")}
+
+    return factors
 
 
 @app.route("/api/predict", methods=["POST"])
@@ -316,21 +424,7 @@ def create_prediction():
             market_odds=data.get("marketOdds"),
         )
 
-        factors = prediction_result["factors"]
-        fixture_id = data.get("fixtureId")
-        if fixture_id is not None and str(fixture_id).isdigit() and isinstance(factors, dict):
-            factors = {**factors, "fixtureId": int(fixture_id)}
-
-        # Persist full team names + date for unambiguous AI resolution.
-        if isinstance(factors, dict):
-            if data.get("homeTeam"):
-                factors = {**factors, "homeTeam": data.get("homeTeam")}
-            if data.get("awayTeam"):
-                factors = {**factors, "awayTeam": data.get("awayTeam")}
-            if data.get("date"):
-                factors = {**factors, "date": data.get("date")}
-            if data.get("time"):
-                factors = {**factors, "time": data.get("time")}
+        factors = _enrich_factors_for_storage(prediction_result["factors"], data)
 
         # Create prediction object
         prediction = Prediction(
@@ -376,6 +470,28 @@ def create_prediction():
     except Exception as e:
         logger.error("Error in create_prediction: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _select_predictions_for_purge(preds, delete_unresolved, delete_test):
+    to_delete = []
+    for p in preds:
+        if delete_unresolved and not p.resolved:
+            to_delete.append(p)
+            continue
+        if delete_test and (p.league == "TEST" or (p.match_id or "").startswith("TEST-")):
+            to_delete.append(p)
+    return to_delete
+
+
+def _dedupe_predictions_by_id(predictions):
+    seen = set()
+    uniq = []
+    for p in predictions:
+        if p.prediction_id in seen:
+            continue
+        seen.add(p.prediction_id)
+        uniq.append(p)
+    return uniq
 
 
 @app.route("/api/predictions", methods=["GET"])
@@ -454,6 +570,50 @@ def get_prediction(prediction_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def _is_legacy_match_id(match_id: str) -> bool:
+    import re
+
+    return bool(re.fullmatch(r"[A-Za-z]+-\d+", match_id or ""))
+
+
+def _build_fixture_index(legacy, days_ahead: int):
+    matches_by_league = {}
+    fixture_index = {}
+
+    for league in {p.league for p in legacy if p.league}:
+        try:
+            matches = _data_fetcher.get_league_matches(league=league, days_ahead=days_ahead)
+        except Exception:
+            matches = []
+        matches_by_league[league] = matches
+        for m in matches:
+            fid = m.get("fixtureId")
+            if isinstance(fid, int):
+                fixture_index[(league, fid)] = m
+
+    return matches_by_league, fixture_index
+
+
+def _migrate_single_prediction(p, fixture_index, dry_run: bool):
+    league, fid_str = p.match_id.split("-", 1)
+    fid = int(fid_str)
+    m = fixture_index.get((league, fid))
+    if not m:
+        return "skipped", {"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "fixture_not_found"}
+
+    new_match_id = f"{league}-{fid}-{_team_code(m.get('homeTeam', ''))}-{_team_code(m.get('awayTeam', ''))}-{m.get('date', '')}"
+    if not m.get("date"):
+        return "skipped", {"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "missing_date"}
+
+    if dry_run:
+        return "updated", {"predictionId": p.prediction_id, "from": p.match_id, "to": new_match_id, "dryRun": True}
+
+    ok = db.update_prediction_match_id(p.prediction_id, new_match_id)
+    if ok:
+        return "updated", {"predictionId": p.prediction_id, "from": p.match_id, "to": new_match_id, "dryRun": False}
+    return "skipped", {"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "update_failed_or_conflict"}
+
+
 @app.route("/api/admin/purge-predictions", methods=["POST"])
 def purge_predictions():
     try:
@@ -465,22 +625,8 @@ def purge_predictions():
 
         preds = db.get_all_predictions(page=1, limit=500)
 
-        to_delete = []
-        for p in preds:
-            if delete_unresolved and not p.resolved:
-                to_delete.append(p)
-                continue
-            if delete_test and (p.league == "TEST" or (p.match_id or "").startswith("TEST-")):
-                to_delete.append(p)
-
-        # Deduplicate by prediction_id
-        seen = set()
-        uniq = []
-        for p in to_delete:
-            if p.prediction_id in seen:
-                continue
-            seen.add(p.prediction_id)
-            uniq.append(p)
+        to_delete = _select_predictions_for_purge(preds, delete_unresolved, delete_test)
+        uniq = _dedupe_predictions_by_id(to_delete)
 
         sample = [p.to_dict() for p in uniq[: max(0, sample_limit)]]
 
@@ -524,27 +670,11 @@ def migrate_match_ids():
 
         unresolved = db.get_unresolved_predictions()
 
-        import re
-
-        legacy = []
-        for p in unresolved:
-            if re.fullmatch(r"[A-Za-z]+-\d+", p.match_id or ""):
-                legacy.append(p)
+        legacy = [p for p in unresolved if _is_legacy_match_id(p.match_id or "")]
 
         legacy = legacy[: max(0, max_items)]
 
-        matches_by_league = {}
-        fixture_index = {}
-        for league in {p.league for p in legacy if p.league}:
-            try:
-                matches = _data_fetcher.get_league_matches(league=league, days_ahead=days_ahead)
-            except Exception:
-                matches = []
-            matches_by_league[league] = matches
-            for m in matches:
-                fid = m.get("fixtureId")
-                if isinstance(fid, int):
-                    fixture_index[(league, fid)] = m
+        _, fixture_index = _build_fixture_index(legacy, days_ahead)
 
         updated = []
         skipped = []
@@ -552,27 +682,11 @@ def migrate_match_ids():
 
         for p in legacy:
             try:
-                league, fid_str = p.match_id.split("-", 1)
-                fid = int(fid_str)
-                m = fixture_index.get((league, fid))
-                if not m:
-                    skipped.append({"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "fixture_not_found"})
-                    continue
-
-                new_match_id = f"{league}-{fid}-{_team_code(m.get('homeTeam', ''))}-{_team_code(m.get('awayTeam', ''))}-{m.get('date', '')}"
-                if not m.get("date"):
-                    skipped.append({"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "missing_date"})
-                    continue
-
-                if dry_run:
-                    updated.append({"predictionId": p.prediction_id, "from": p.match_id, "to": new_match_id, "dryRun": True})
-                    continue
-
-                ok = db.update_prediction_match_id(p.prediction_id, new_match_id)
-                if ok:
-                    updated.append({"predictionId": p.prediction_id, "from": p.match_id, "to": new_match_id, "dryRun": False})
+                kind, payload = _migrate_single_prediction(p, fixture_index, dry_run)
+                if kind == "updated":
+                    updated.append(payload)
                 else:
-                    skipped.append({"predictionId": p.prediction_id, "matchId": p.match_id, "reason": "update_failed_or_conflict"})
+                    skipped.append(payload)
 
             except Exception as e:
                 errors.append({"predictionId": getattr(p, "prediction_id", None), "matchId": getattr(p, "match_id", None), "error": str(e)})
@@ -713,60 +827,22 @@ def _process_single_prediction(prediction, resolver, db):
     """Process a single prediction and return result or error."""
     try:
         # Prefer resolving via stored full team names + date (avoids ambiguous 3-letter codes)
-        factors = prediction.factors if isinstance(getattr(prediction, "factors", None), dict) else {}
-        home_team = factors.get("homeTeam") or factors.get("home_team")
-        away_team = factors.get("awayTeam") or factors.get("away_team")
-        match_date = factors.get("date")
-        match_time = factors.get("time")
+        factors, home_team, away_team, match_date, match_time = _extract_prediction_factors(prediction)
 
         # Cheap gating first: if the match is in the future, skip without calling any provider.
-        if match_date:
-            try:
-                match_day = datetime.strptime(match_date, "%Y-%m-%d").date()
-                if datetime.now().date() < match_day:
-                    return {"type": "skipped", "reason": "future_match_date"}
-            except Exception:
-                pass
+        if _should_skip_future_match(match_date):
+            return {"type": "skipped", "reason": "future_match_date"}
 
         # If kickoff time is known, also avoid premature checks until the match should be finished.
-        if match_date and match_time:
-            try:
-                kickoff = datetime.strptime(f"{match_date} {match_time}", "%Y-%m-%d %H:%M")
-                if datetime.now() < kickoff + timedelta(minutes=130):
-                    return {"type": "skipped", "reason": "not_finished_window"}
-            except Exception:
-                pass
+        if _is_within_not_finished_window(match_date, match_time):
+            return {"type": "skipped", "reason": "not_finished_window"}
 
         # If we have a fixtureId, use the authoritative provider status to decide whether
         # the match is truly finished. This avoids AI hallucination.
-        fixture_id = factors.get("fixtureId")
-        if fixture_id is None:
-            parts = (prediction.match_id or "").split("-")
-            if len(parts) >= 2 and str(parts[1]).isdigit():
-                fixture_id = int(parts[1])
-
-        if fixture_id is not None:
-            try:
-                info = resolver.data_fetcher.get_fixture_info(int(fixture_id))
-                status = (info or {}).get("status")
-                if status and status != "FINISHED":
-                    return {"type": "skipped", "reason": f"provider_status_{status.lower()}"}
-                # If provider says FINISHED, resolve via the fixture endpoint (truth source).
-                if status == "FINISHED":
-                    actual_outcome = resolver.data_fetcher.get_match_result(prediction.match_id)
-                    if actual_outcome:
-                        is_correct = prediction.predicted_outcome == actual_outcome
-                        db.resolve_prediction(prediction.prediction_id, actual_outcome, is_correct)
-                        return {
-                            "type": "success",
-                            "data": {
-                                "matchId": prediction.match_id,
-                                "predictionId": prediction.prediction_id,
-                                "correct": is_correct,
-                            },
-                        }
-            except Exception:
-                pass
+        fixture_id = _extract_fixture_id(prediction, factors)
+        fixture_resolution = _try_resolve_from_fixture_status(prediction, resolver, db, fixture_id)
+        if fixture_resolution is not None:
+            return fixture_resolution
 
         # Without fixtureId/provider status, fall back to the previous behavior.
         if home_team and away_team and match_date:
@@ -801,6 +877,27 @@ def _process_single_prediction(prediction, resolver, db):
     }
 
 
+def _accumulate_prediction_processing_result(result, results, errors, skipped):
+    if result["type"] == "error":
+        errors.append(result["data"])
+        return
+    if result["type"] == "success":
+        results.append(result["data"])
+        return
+    if result["type"] != "skipped":
+        return
+
+    reason = result.get("reason") or "no_result"
+    if reason.startswith("provider_status_"):
+        # Ensure bucket exists even if provider adds a new status.
+        if reason not in skipped:
+            skipped[reason] = 0
+        skipped[reason] += 1
+        return
+
+    skipped[reason] = skipped.get(reason, 0) + 1
+
+
 def _process_predictions(unresolved, max_items, time_budget_seconds, resolver, db):
     """Process all predictions within limits."""
     results = []
@@ -827,20 +924,8 @@ def _process_predictions(unresolved, max_items, time_budget_seconds, resolver, d
             break
         
         result = _process_single_prediction(prediction, resolver, db)
-        
-        if result["type"] == "error":
-            errors.append(result["data"])
-        elif result["type"] == "success":
-            results.append(result["data"])
-        elif result["type"] == "skipped":
-            reason = result.get("reason") or "no_result"
-            if reason.startswith("provider_status_"):
-                # Ensure bucket exists even if provider adds a new status.
-                if reason not in skipped:
-                    skipped[reason] = 0
-                skipped[reason] += 1
-            else:
-                skipped[reason] = skipped.get(reason, 0) + 1
+
+        _accumulate_prediction_processing_result(result, results, errors, skipped)
 
         processed += 1
 
@@ -1089,19 +1174,7 @@ def get_agent_status():
 
         # Per-league breakdown
         leagues = ["EPL", "LaLiga", "SerieA", "Bundesliga", "Ligue1"]
-        league_stats = []
-        for lg in leagues:
-            lg_preds = db.get_predictions_by_league(lg, page=1, limit=1000)
-            if lg_preds:
-                resolved = sum(1 for p in lg_preds if p.resolved)
-                correct = sum(1 for p in lg_preds if p.resolved and p.correct)
-                league_stats.append({
-                    "league": lg,
-                    "total": len(lg_preds),
-                    "resolved": resolved,
-                    "correct": correct,
-                    "accuracy": round(correct / resolved * 100, 1) if resolved else 0,
-                })
+        league_stats = _compute_league_breakdown(leagues)
 
         return jsonify({
             "success": True,
