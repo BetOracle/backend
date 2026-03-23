@@ -310,7 +310,10 @@ class BlockchainClient:
             
             # Sign and send
             signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            raw_tx = getattr(signed_tx, "rawTransaction", None) or getattr(signed_tx, "raw_transaction", None)
+            if raw_tx is None:
+                raise AttributeError("SignedTransaction missing raw transaction bytes")
+            tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
             
             # Wait for receipt
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)

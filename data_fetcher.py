@@ -114,6 +114,8 @@ class DataFetcher:
     # TTLs for data that changes at different rates
     CACHE_TTL_LIVE = 300          # 5 min  — form, standings (changes match-to-match)
     CACHE_TTL_DAILY = 86400       # 24 hr  — H2H history, AI odds (stable within a day)
+    CACHE_TTL_TEAMS = 21600       # 6 hr   — competition team list changes rarely
+    CACHE_TTL_MATCHES = 300       # 5 min  — upcoming matches
 
     def _get_cached(self, cache_key: Optional[str], ttl: int = None) -> Optional[Dict]:
         if not cache_key or cache_key not in self.cache:
@@ -123,6 +125,12 @@ class DataFetcher:
         if (datetime.now() - cached_time).total_seconds() < effective_ttl:
             return cached_data
         return None
+
+    def _get_cached_stale(self, cache_key: Optional[str]) -> Optional[Dict]:
+        if not cache_key or cache_key not in self.cache:
+            return None
+        _, cached_data = self.cache[cache_key]
+        return cached_data
 
     def _set_cache(self, cache_key: Optional[str], data: Dict) -> None:
         if cache_key:
@@ -157,19 +165,30 @@ class DataFetcher:
         return self.strict_real_data and not self.mock_mode
 
     def _handle_rate_limit(self, url: str, headers: Dict, cache_key: Optional[str]) -> Optional[Dict]:
-        logger.warning("Rate limit exceeded — retrying after backoff")
-        backoff = self._backoff_seconds_from_response(self._last_response) if self._last_response else 6.0
-        time.sleep(max(0.0, backoff))
+        stale = self._get_cached_stale(cache_key)
+        max_attempts = 3
+        for _ in range(1, max_attempts + 1):
+            logger.warning("Rate limit exceeded — retrying after backoff")
+            backoff = self._backoff_seconds_from_response(self._last_response) if self._last_response else 6.0
+            time.sleep(max(0.0, backoff))
 
-        retry_response = self._request_once(url, headers)
-        if retry_response.status_code == 200:
-            data = retry_response.json()
-            self._set_cache(cache_key, data)
-            return data
+            retry_response = self._request_once(url, headers)
+            self._last_response = retry_response
+            if retry_response.status_code == 200:
+                data = retry_response.json()
+                self._set_cache(cache_key, data)
+                return data
+
+            if retry_response.status_code != 429:
+                break
+
+        if stale is not None:
+            return stale
 
         if self._should_raise_on_real_api_failure():
+            last_text = self._last_response.text if self._last_response is not None else ""
             raise RuntimeError(
-                f"API rate limit exceeded (429). Last response: {retry_response.text}"
+                f"API rate limit exceeded (429). Last response: {last_text}"
             )
         return None
 
@@ -370,7 +389,10 @@ class DataFetcher:
         """Get team ID from football-data.org"""
         url = f"{self.football_api_url}/competitions/{league_id}/teams"
         headers = {"X-Auth-Token": self.football_api_key}
-        data = self._make_request(url, headers, f"teams_{league_id}")
+        cache_key = f"teams_{league_id}"
+        data = self._get_cached(cache_key, ttl=self.CACHE_TTL_TEAMS)
+        if data is None:
+            data = self._make_request(url, headers, cache_key)
 
         if not data or "teams" not in data:
             return None
@@ -701,7 +723,10 @@ class DataFetcher:
 
             url = f"{self.football_api_url}/competitions/{league_id}/matches?dateFrom={date_from}&dateTo={date_to}"
             headers = {"X-Auth-Token": self.football_api_key}
-            data = self._make_request(url, headers, f"matches_{league_id}")
+            cache_key = f"matches_{league_id}"
+            data = self._get_cached(cache_key, ttl=self.CACHE_TTL_MATCHES)
+            if data is None:
+                data = self._make_request(url, headers, cache_key)
 
             if not data or "matches" not in data:
                 self._strict_fail("No matches returned for league matches")
