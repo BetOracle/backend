@@ -32,7 +32,7 @@ This document describes how FootyOracle fetches match data and how to configure 
 ### MVP / production-friendly (recommended)
 ```bash
 MOCK_MODE=False
-FOOTBALL_API_KEY=...
+FOOTBALL_API_KEY=...rrfjhsgh26782gjdjhgdnmx
 INJURIES_ENABLED=False
 REQUESTS_PER_MINUTE=8
 ```
