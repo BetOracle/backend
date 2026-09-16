@@ -3,6 +3,7 @@ ai_enrichment.py — AI-powered data enrichment for football predictions
 
 Replaces broken APIs (RapidAPI injuries, Odds API) with LLM-based enrichment.
 Uses Claude/OpenAI to analyze team form, injuries, and provide market insights.
+Uses OpenAI for testing
 """
 
 import os
